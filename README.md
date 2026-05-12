@@ -1,80 +1,154 @@
 # github-claude
 
-범용 GitHub Issue 자동 처리 webhook 서버. Claude Code CLI를 이용하여 Issue를 자동으로 수정하고, PR 생성/리뷰 또는 QuestCode QA 검증까지 자동화합니다.
+A generic GitHub Issue automation webhook server powered by Claude Code CLI. Automatically fixes issues, creates PRs, reviews code, and deploys — configurable for any project via `.env`.
 
-## 설치
+## Prerequisites
+
+- Node.js >= 18
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
+- GitHub Personal Access Token with `repo` scope
+
+## Installation
 
 ```bash
 git clone https://github.com/inspirio-co/github-claude.git
 cd github-claude
 npm install
 cp .env.example .env
-# .env 파일을 프로젝트에 맞게 수정
+# Edit .env for your project
 ```
 
-## 설정
+## Configuration
 
-`.env` 파일에서 다음 항목을 설정합니다:
+All settings are controlled via `.env`. See `.env.example` for all options.
 
-| 항목 | 설명 |
-|------|------|
-| `GITHUB_TOKEN` | GitHub Personal Access Token (repo 권한) |
-| `GITHUB_OWNER` | GitHub 소유자/조직 |
-| `GITHUB_REPO` | 대상 레포지토리 |
-| `GITHUB_BASE_BRANCH` | 기본 브랜치 (main/master) |
-| `WORKSPACE_DIR` | 로컬 작업 디렉토리 경로 |
-| `ENABLE_PR` | PR 생성 활성화 (true/false) |
-| `ENABLE_REVIEW` | 자동 리뷰 활성화 (true/false) |
-| `ENABLE_QUESTCODE` | QuestCode QA 연동 (true/false) |
+### Required
 
-## 사용 방식
+| Variable | Description |
+|----------|-------------|
+| `GITHUB_TOKEN` | GitHub Personal Access Token (repo scope) |
+| `GITHUB_OWNER` | GitHub owner or organization |
+| `GITHUB_REPO` | Target repository name |
+| `GITHUB_BASE_BRANCH` | Base branch (`main` or `master`) |
+| `WORKSPACE_DIR` | Local clone path of the repository |
 
-### Flow A: PR + Review (기본)
+### Feature Flags
 
-1. Issue에 `auto-fix` 라벨 추가
-2. Claude Code가 코드 자동 수정
-3. `auto-fix/issue-N` 브랜치 생성 → PR 생성
-4. Claude Code가 PR diff 리뷰
-5. APPROVE → 자동 머지 → 빌드/배포 → Issue 종료
-6. REQUEST_CHANGES → 자동 재수정 → 재리뷰 (최대 N회)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENABLE_PR` | `true` | Create PR for each fix |
+| `ENABLE_REVIEW` | `true` | Auto-review PRs with Claude |
+| `ENABLE_BUILD` | `true` | Run build after merge |
+| `ENABLE_QUESTCODE` | `false` | Use QuestCode QA instead of PR review |
 
-### Flow B: QuestCode QA
+### Labels
 
-1. Issue에 `auto-fix` 라벨 추가
-2. Claude Code가 코드 자동 수정
-3. QuestCode QA 테스트 실행
-4. 통과 → Issue 종료
-5. 실패 → 자동 재수정 → 재테스트 (최대 N회)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LABEL_TRIGGER` | `auto-fix` | Label that triggers automation |
+| `LABEL_IN_PROGRESS` | `status/in-progress` | Applied while processing |
+| `LABEL_DONE` | `status/done` | Applied on completion |
+| `LABEL_NEEDS_REVIEW` | `status/needs-review` | Applied when max retries exceeded |
 
-## 실행
+### Claude Code
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CLAUDE_ALLOWED_TOOLS` | `Edit,Write,Glob,Grep,Read` | Tools for fix agent |
+| `CLAUDE_REVIEW_TOOLS` | `Glob,Grep,Read` | Tools for review agent (read-only) |
+| `CLAUDE_TIMEOUT` | `600000` | CLI timeout in ms |
+| `CLAUDE_MAX_RETRIES` | `3` | Max re-fix attempts on review rejection |
+| `BRANCH_PREFIX` | `auto-fix` | Branch name prefix |
+
+## How It Works
+
+### Flow A: PR + Auto-Review (default)
+
+```
+Issue labeled "auto-fix"
+  → Claude Code fixes the code
+  → Creates branch auto-fix/issue-N, commits, pushes
+  → Opens Pull Request
+  → GitHub sends pull_request.opened event
+  → Claude Code reviews the PR diff
+    → APPROVE: merge → pull → build/deploy → close issue
+    → REQUEST_CHANGES: Claude re-fixes → push → re-review (up to N retries)
+```
+
+### Flow B: QuestCode QA (optional)
+
+```
+Issue labeled "auto-fix"
+  → Claude Code fixes the code
+  → Starts QuestCode QA job
+  → QuestCode sends result via webhook
+    → PASS: close issue
+    → FAIL: Claude re-fixes → re-test (up to N retries)
+```
+
+## Running
 
 ```bash
-# 직접 실행
+# Direct
 node src/server.js
 
 # PM2
-pm2 start src/server.js --name github-claude
+pm2 start src/server.js --name github-claude --cwd /path/to/github-claude
+
+# PM2 with name
+pm2 start src/server.js --name mrv-webhook --cwd /path/to/github-claude
 ```
 
-## GitHub Webhook 설정
+## GitHub Webhook Setup
 
-1. 라벨 생성:
+### 1. Create labels
+
 ```bash
 source .env && ./create-labels.sh
 ```
 
-2. GitHub 레포 → Settings → Webhooks → Add webhook:
-   - Payload URL: `http://your-server:3031/webhook/github`
-   - Content type: `application/json`
-   - Secret: `.env`의 `GITHUB_WEBHOOK_SECRET`과 동일
-   - Events: Issues, Pull requests
+### 2. Add webhook in GitHub
 
-## 엔드포인트
+Go to **Repository → Settings → Webhooks → Add webhook**:
 
-| 경로 | 설명 |
-|------|------|
-| `POST /webhook/github` | GitHub Webhook 수신 |
-| `POST /webhook/questcode` | QuestCode Webhook 수신 |
-| `GET /health` | 헬스 체크 |
-| `GET /status` | 상태 확인 (설정, 활성 Job) |
-| `GET /logs?tail=100` | 최근 로그 확인 |
+- **Payload URL**: `http://your-server:3031/webhook/github`
+- **Content type**: `application/json`
+- **Secret**: same as `GITHUB_WEBHOOK_SECRET` in `.env`
+- **Events**: select **Issues** and **Pull requests**
+
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/webhook/github` | GitHub webhook receiver |
+| `POST` | `/webhook/questcode` | QuestCode webhook receiver |
+| `GET` | `/health` | Health check (config, active jobs) |
+| `GET` | `/status` | Detailed status (config, labels, jobs) |
+| `GET` | `/logs?tail=100` | Recent log lines |
+
+## Project Structure
+
+```
+github-claude/
+├── src/
+│   ├── server.js           # Express app, endpoint routing
+│   ├── config.js            # .env → config object
+│   ├── logger.js            # Console + file logging
+│   ├── webhook-handler.js   # GitHub event dispatch
+│   ├── fix-agent.js         # Issue → Claude Code fix → PR or QuestCode
+│   ├── review-agent.js      # PR diff → Claude Code review → APPROVE/REQUEST_CHANGES
+│   ├── git-ops.js           # Branch, commit, push, pull
+│   ├── github-api.js        # GitHub REST API (labels, comments, PR, merge, diff)
+│   ├── build-deploy.js      # Build & deploy execution
+│   ├── questcode-api.js     # QuestCode QA integration (optional)
+│   └── job-store.js         # Persistent job state (active-jobs.json)
+├── package.json
+├── .env.example
+├── .gitignore
+├── create-labels.sh
+└── README.md
+```
+
+## License
+
+Private — inspirio-co internal use.

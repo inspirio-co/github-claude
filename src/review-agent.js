@@ -107,7 +107,23 @@ async function reviewPR(prNumber, retryCount = 0) {
   try {
     // 1. PR 정보 & diff 가져오기
     const pr = await githubApi.getPullRequest(owner, repo, prNumber);
-    const diff = await githubApi.getPullRequestDiff(owner, repo, prNumber);
+    let diff = '';
+    try {
+      diff = await githubApi.getPullRequestDiff(owner, repo, prNumber);
+    } catch (diffErr) {
+      logger.warn(`GitHub API diff failed for PR #${prNumber}, falling back to local git diff`, { error: diffErr.message });
+      // GitHub API가 406(too large) 등으로 실패하면 로컬 git diff 사용
+      try {
+        const baseBranch = pr.base?.ref || config.baseBranch;
+        const headBranch = pr.head?.ref || '';
+        await gitOps.checkout(headBranch);
+        diff = await gitOps.run(`git diff ${baseBranch}...${headBranch}`);
+        logger.info(`Local git diff obtained for PR #${prNumber}`, { diffLength: diff.length });
+      } catch (localDiffErr) {
+        logger.error(`Local git diff also failed for PR #${prNumber}`, { error: localDiffErr.message });
+        throw new Error(`Cannot obtain diff: API=${diffErr.message}, local=${localDiffErr.message}`);
+      }
+    }
 
     if (!diff || diff.trim().length === 0) {
       logger.warn(`PR #${prNumber} has empty diff, auto-approving`);

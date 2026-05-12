@@ -52,7 +52,6 @@ async function runClaude(prompt, tools, label) {
  */
 async function fixIssue(issueData) {
   const { number, title, body, labels } = issueData;
-  const { owner, repo } = config;
 
   logger.info(`=== Fix agent started for issue #${number}: ${title} ===`);
 
@@ -119,45 +118,7 @@ ${reviewFeedback}
 }
 
 /**
- * QuestCode 리포트를 기반으로 Claude Code 재수정 실행
- */
-async function refixFromQuestCode(issueData, questcodeReport, retryCount) {
-  const { number, title, body } = issueData;
-
-  logger.info(`=== QuestCode re-fix started for issue #${number} (retry ${retryCount}/${config.claude.maxRetries}) ===`);
-
-  const prompt = `
-GitHub Issue #${number} 재수정 요청 (${retryCount}차 재시도):
-
-원래 이슈 제목: ${title}
-원래 이슈 내용:
-${body || '(내용 없음)'}
-
----
-
-QuestCode QA 테스트 결과에서 아래 문제가 발견되었습니다. 이 문제들을 해결해주세요:
-
-${questcodeReport}
-
----
-
-다음 순서로 작업해주세요:
-1. QuestCode 리포트에서 지적된 문제를 분석
-2. 관련 파일을 찾아서 읽기
-3. 문제를 수정
-4. 빌드 확인
-5. 수정 내용 요약 제공
-
-반드시 QuestCode에서 지적된 문제를 모두 해결해주세요.
-`.trim();
-
-  const output = await runClaude(prompt, config.claude.allowedTools, `qc-refix-${number}-${retryCount}`);
-  logger.info(`QuestCode re-fix output for issue #${number}`, { outputSnippet: output.substring(0, 300) });
-  return output;
-}
-
-/**
- * Flow A: PR 방식 - Issue 수정 후 브랜치 생성, PR 생성
+ * Issue 수정 후 브랜치 생성, PR 생성
  */
 async function processWithPR(issueData) {
   const { number, title } = issueData;
@@ -220,37 +181,8 @@ async function processWithPR(issueData) {
   }
 }
 
-/**
- * Flow B: QuestCode 방식 - Issue 수정 후 QuestCode QA 연동
- */
-async function processWithQuestCode(issueData) {
-  const { number, title } = issueData;
-  const { owner, repo } = config;
-
-  try {
-    // 1. 라벨 업데이트 & 코멘트
-    await githubApi.updateIssueLabels(owner, repo, number, [config.labels.inProgress]);
-    await githubApi.commentOnIssue(owner, repo, number, '🤖 Claude가 이슈 처리를 시작합니다...');
-
-    // 2. Claude Code로 수정
-    const claudeOutput = await fixIssue(issueData);
-
-    logger.info(`Fix agent completed for issue #${number}, starting QuestCode QA`);
-    return { success: true, claudeOutput };
-
-  } catch (error) {
-    logger.error(`Fix agent failed for issue #${number} (QuestCode flow)`, { error: error.message, stack: error.stack });
-    await githubApi.commentOnIssue(owner, repo, number,
-      `❌ 자동 수정 중 오류 발생:\n\n\`\`\`\n${error.message}\n\`\`\``
-    ).catch(e => logger.error(`Failed to comment on error: ${e.message}`));
-    return { success: false, error: error.message };
-  }
-}
-
 module.exports = {
   fixIssue,
   refixFromReview,
-  refixFromQuestCode,
   processWithPR,
-  processWithQuestCode,
 };

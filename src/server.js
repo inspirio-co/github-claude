@@ -4,8 +4,7 @@ const crypto = require('crypto');
 const express = require('express');
 const fs = require('fs').promises;
 const path = require('path');
-const { handleGitHubEvent, handleQuestCodeEvent } = require('./webhook-handler');
-const jobStore = require('./job-store');
+const { handleGitHubEvent } = require('./webhook-handler');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -61,20 +60,6 @@ app.post('/webhook/github', async (req, res) => {
   }
 });
 
-// ─── QuestCode Webhook 엔드포인트 ───
-
-app.post('/webhook/questcode', async (req, res) => {
-  logger.info('QuestCode webhook received', { jobId: req.body.jobId, status: req.body.status });
-
-  res.status(200).json({ message: 'Webhook received' });
-
-  try {
-    await handleQuestCodeEvent(req.body);
-  } catch (error) {
-    logger.error(`Unhandled error in QuestCode webhook handler`, { error: error.message, stack: error.stack });
-  }
-});
-
 // ─── Health Check ───
 
 app.get('/health', (req, res) => {
@@ -87,7 +72,6 @@ app.get('/health', (req, res) => {
       baseBranch: config.baseBranch,
       features: config.features,
     },
-    activeJobs: jobStore.size(),
   });
 });
 
@@ -95,7 +79,6 @@ app.get('/health', (req, res) => {
 
 app.get('/status', (req, res) => {
   res.json({
-    activeJobs: jobStore.all(),
     config: {
       owner: config.owner,
       repo: config.repo,
@@ -129,7 +112,7 @@ app.get('/logs', async (req, res) => {
 app.listen(config.port, () => {
   logger.info(`github-claude webhook server started on port ${config.port}`);
   logger.info(`Config: ${config.owner}/${config.repo} (${config.baseBranch})`);
-  logger.info(`Features: PR=${config.features.pr}, Review=${config.features.review}, Build=${config.features.build}, QuestCode=${config.features.questcode}`);
+  logger.info(`Features: PR=${config.features.pr}, Review=${config.features.review}, Build=${config.features.build}`);
   logger.info(`Workspace: ${config.workspaceDir}`);
   logger.info(`Trigger label: "${config.labels.trigger}"`);
   logger.info(`Branch prefix: "${config.branchPrefix}"`);

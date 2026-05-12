@@ -36,20 +36,11 @@ const config = {
     pr: process.env.ENABLE_PR !== 'false',
     review: process.env.ENABLE_REVIEW !== 'false',
     build: process.env.ENABLE_BUILD !== 'false',
-    questcode: process.env.ENABLE_QUESTCODE === 'true',
   },
 
   // Build & Deploy
   buildCommand: process.env.BUILD_COMMAND || '',
   deployCommand: process.env.DEPLOY_COMMAND || '',
-
-  // QuestCode
-  questcode: {
-    apiUrl: process.env.QUESTCODE_API_URL || 'https://questcode.ai',
-    apiToken: process.env.QUESTCODE_API_TOKEN || '',
-    credentialId: process.env.QUESTCODE_CREDENTIAL_ID || '',
-    siteUrl: process.env.QUESTCODE_SITE_URL || '',
-  },
 };
 
 module.exports = config;

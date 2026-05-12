@@ -81,20 +81,79 @@ pm2 save
 
 ## GitHub Webhook Setup
 
-### 1. Create labels
+### 1. GitHub Personal Access Token
+
+Generate a **Fine-grained Personal Access Token** (recommended) or a classic token.
+
+**Fine-grained token permissions** (repository-scoped):
+
+| Permission | Access | Used for |
+|------------|--------|----------|
+| Issues | Read & Write | Add labels, post comments, close issues |
+| Pull requests | Read & Write | Create PRs, post reviews, merge |
+| Contents | Read & Write | Push branches, delete merged branches |
+| Metadata | Read-only | Required by default |
+
+**Classic token**: select the `repo` scope (full control of private repositories).
+
+Set the token as `GITHUB_TOKEN` in `.env`.
+
+### 2. Create labels
+
+Create the required labels in your repository:
 
 ```bash
 source .env && ./create-labels.sh
 ```
 
-### 2. Add webhook
+This creates: `auto-fix`, `status/in-progress`, `status/done`, `status/needs-review`.
 
-Repository → Settings → Webhooks → Add webhook:
+### 3. Add webhook
 
-- **Payload URL**: `http://your-server:3031/webhook/github`
-- **Content type**: `application/json`
-- **Secret**: same as `GITHUB_WEBHOOK_SECRET` in `.env`
-- **Events**: Issues, Pull requests
+Go to **Repository → Settings → Webhooks → Add webhook**.
+
+| Field | Value |
+|-------|-------|
+| **Payload URL** | `http://your-server:3031/webhook/github` |
+| **Content type** | `application/json` |
+| **Secret** | Same value as `GITHUB_WEBHOOK_SECRET` in `.env` (leave both empty to skip signature verification) |
+
+**Select individual events** — only check the following:
+
+| Event | Why |
+|-------|-----|
+| **Issues** | Detects when `auto-fix` label is added to trigger the fix agent |
+| **Pull requests** | Detects `opened` / `synchronize` events on `auto-fix/*` branches to trigger the review agent |
+
+> **Note:** Do **not** use "Send me everything." Only the two events above are handled; extra events are ignored but create unnecessary traffic.
+
+### 4. Network requirements
+
+The webhook server must be reachable from GitHub's infrastructure:
+
+- **Public server**: Ensure port (default `3031`) is open in your firewall / security group.
+- **Behind NAT / local development**: Use a tunnel such as [ngrok](https://ngrok.com), [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/), or [smee.io](https://smee.io).
+
+```bash
+# Example with ngrok
+ngrok http 3031
+# Use the generated https URL as your Payload URL
+```
+
+### 5. Verify
+
+After adding the webhook, GitHub sends a `ping` event. Check your server logs:
+
+```
+[INFO] Ping event received - webhook is configured correctly
+```
+
+You can also verify from the terminal:
+
+```bash
+curl http://localhost:3031/health
+# {"status":"ok", ...}
+```
 
 ## Endpoints
 

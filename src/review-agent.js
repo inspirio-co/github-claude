@@ -127,10 +127,9 @@ async function reviewPR(prNumber, retryCount = 0) {
 
     if (!diff || diff.trim().length === 0) {
       logger.warn(`PR #${prNumber} has empty diff, auto-approving`);
-      await githubApi.createPullRequestReview(owner, repo, prNumber, {
-        event: 'APPROVE',
-        body: '✅ 변경사항 없음 - 자동 승인',
-      });
+      await githubApi.commentOnIssue(owner, repo, prNumber,
+        '✅ 변경사항 없음 - 자동 승인'
+      );
       return { verdict: 'APPROVE', reason: 'empty-diff' };
     }
 

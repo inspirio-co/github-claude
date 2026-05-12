@@ -3,12 +3,55 @@ const logger = require('./logger');
 const githubApi = require('./github-api');
 const fixAgent = require('./fix-agent');
 const reviewAgent = require('./review-agent');
-// 동시 처리 방지를 위한 락
-const processingIssues = new Set();
-const processingPRs = new Set();
+const gitOps = require('./git-ops');
 
 // PR별 retryCount 추적 (메모리)
 const prRetryCount = new Map();
+
+// 순차 처리 큐
+const taskQueue = [];
+let isProcessing = false;
+
+function enqueueTask(taskFn, label) {
+  return new Promise((resolve, reject) => {
+    taskQueue.push({ fn: taskFn, label, resolve, reject });
+    logger.info(`Task queued: ${label} (queue size: ${taskQueue.length})`);
+    processQueue();
+  });
+}
+
+async function processQueue() {
+  if (isProcessing) return;
+  if (taskQueue.length === 0) return;
+
+  isProcessing = true;
+  const { fn, label, resolve, reject } = taskQueue.shift();
+  logger.info(`Task started: ${label} (remaining: ${taskQueue.length})`);
+
+  try {
+    // 작업 시작 전 워크스페이스 정리
+    try {
+      await gitOps.run('git checkout -- .');
+      await gitOps.run(`git checkout ${config.baseBranch}`);
+    } catch (cleanErr) {
+      logger.warn(`Workspace cleanup before task: ${cleanErr.message}`);
+      try {
+        await gitOps.resetHard('HEAD');
+        await gitOps.run(`git checkout ${config.baseBranch}`);
+      } catch (_) {}
+    }
+
+    const result = await fn();
+    resolve(result);
+  } catch (error) {
+    logger.error(`Task failed: ${label}`, { error: error.message });
+    reject(error);
+  } finally {
+    isProcessing = false;
+    logger.info(`Task completed: ${label}`);
+    processQueue(); // 다음 작업 처리
+  }
+}
 
 /**
  * GitHub Webhook 이벤트 디스패치
@@ -50,14 +93,6 @@ async function handleIssueEvent(payload) {
 
   const issueNumber = issue.number;
 
-  // 중복 처리 방지
-  if (processingIssues.has(issueNumber)) {
-    logger.warn(`Issue #${issueNumber} is already being processed, skipping`);
-    return { handled: false, reason: 'already-processing' };
-  }
-
-  processingIssues.add(issueNumber);
-
   const issueData = {
     number: issue.number,
     title: issue.title,
@@ -68,17 +103,16 @@ async function handleIssueEvent(payload) {
 
   logger.info(`>>> Fix agent triggered: issue #${issueNumber}`);
 
-  try {
+  // 큐에 넣어 순차 처리
+  enqueueTask(async () => {
     if (config.features.pr) {
       await processFlowA(issueData);
     } else {
       await processSimpleFix(issueData);
     }
-  } catch (error) {
+  }, `fix-issue-${issueNumber}`).catch(error => {
     logger.error(`Unhandled error processing issue #${issueNumber}`, { error: error.message, stack: error.stack });
-  } finally {
-    processingIssues.delete(issueNumber);
-  }
+  });
 
   return { handled: true };
 }
@@ -150,14 +184,6 @@ async function handlePullRequestEvent(payload) {
   const prNumber = pr.number;
 
   if (action === 'opened' || action === 'synchronize') {
-    // 중복 처리 방지
-    if (processingPRs.has(prNumber)) {
-      logger.warn(`PR #${prNumber} is already being reviewed, skipping`);
-      return { handled: false, reason: 'already-processing' };
-    }
-
-    processingPRs.add(prNumber);
-
     // retryCount: opened=0, synchronize=이전값+1 (prRetryCount에서 추적)
     let retryCount = 0;
     if (action === 'synchronize') {
@@ -167,7 +193,8 @@ async function handlePullRequestEvent(payload) {
 
     logger.info(`>>> Review agent triggered: PR #${prNumber} (action: ${action}, retry: ${retryCount})`);
 
-    try {
+    // 큐에 넣어 순차 처리
+    enqueueTask(async () => {
       const result = await reviewAgent.reviewPR(prNumber, retryCount);
       logger.info(`Review agent result for PR #${prNumber}`, result);
 
@@ -175,14 +202,11 @@ async function handlePullRequestEvent(payload) {
       if (result.verdict === 'REQUEST_CHANGES' && result.retryCount != null) {
         prRetryCount.set(prNumber, result.retryCount);
       } else {
-        // APPROVE, ERROR, maxRetries → 정리
         prRetryCount.delete(prNumber);
       }
-    } catch (error) {
+    }, `review-pr-${prNumber}`).catch(error => {
       logger.error(`Review agent error for PR #${prNumber}`, { error: error.message, stack: error.stack });
-    } finally {
-      processingPRs.delete(prNumber);
-    }
+    });
 
     return { handled: true };
   }

@@ -1,0 +1,7 @@
+node_modules/
+.env
+*.log
+active-jobs.json
+claude-output-*.txt
+claude-refix-*.txt
+prompt-*.txt

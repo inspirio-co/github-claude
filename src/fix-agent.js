@@ -369,13 +369,13 @@ async function processWithPR(issueData) {
       return { success: false, reason: 'no-changes' };
     }
 
-    await gitOps.commit(`fix: #${number} ${title}`);
+    await gitOps.commit(`[#${number}] ${title}`);
     await gitOps.push(branchName, true);
     logger.info(`Branch ${branchName} pushed for issue #${number}`);
 
     // 5. PR 생성
     const pr = await githubApi.createPullRequest(owner, repo, {
-      title: `fix: #${number} ${title}`,
+      title: `[#${number}] ${title}`,
       body: `Related: #${number}\n\n자동 수정 by Claude Code\n\n**변경 요약:**\n${claudeOutput.substring(0, 2000)}`,
       head: branchName,
       base: config.baseBranch,

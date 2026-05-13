@@ -266,7 +266,7 @@ async function reviewPR(prNumber, retryCount = 0) {
       // 변경사항 커밋 & 푸시
       const hasChanges = await gitOps.hasChanges();
       if (hasChanges) {
-        await gitOps.commit(`fix: #${issueNumber || prNumber} review feedback (retry ${nextRetry})`);
+        await gitOps.commit(`[#${issueNumber || prNumber}] review feedback (retry ${nextRetry})`);
         await gitOps.push(branchName, true);
         logger.info(`Re-fix pushed to ${branchName} for PR #${prNumber}`);
 

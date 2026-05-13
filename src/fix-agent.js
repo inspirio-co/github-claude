@@ -376,7 +376,7 @@ async function processWithPR(issueData) {
     // 5. PR 생성
     const pr = await githubApi.createPullRequest(owner, repo, {
       title: `fix: #${number} ${title}`,
-      body: `Closes #${number}\n\n자동 수정 by Claude Code\n\n**변경 요약:**\n${claudeOutput.substring(0, 2000)}`,
+      body: `Related: #${number}\n\n자동 수정 by Claude Code\n\n**변경 요약:**\n${claudeOutput.substring(0, 2000)}`,
       head: branchName,
       base: config.baseBranch,
     });

@@ -6,3 +6,4 @@ claude-output-*.txt
 claude-refix-*.txt
 prompt-*.txt
 sessions.json
+issue-images/

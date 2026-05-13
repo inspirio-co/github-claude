@@ -5,3 +5,4 @@ active-jobs.json
 claude-output-*.txt
 claude-refix-*.txt
 prompt-*.txt
+sessions.json

@@ -8,40 +8,86 @@ const githubApi = require('./github-api');
 
 const TEMP_DIR = path.join(__dirname, '..');
 
+// 이슈별 세션 ID 저장 (메모리 + 파일 백업)
+const SESSION_FILE = path.join(TEMP_DIR, 'sessions.json');
+let issueSessions = {};
+
+async function loadSessions() {
+  try {
+    const data = await fs.readFile(SESSION_FILE, 'utf-8');
+    issueSessions = JSON.parse(data);
+    logger.info('Sessions loaded', { count: Object.keys(issueSessions).length });
+  } catch (_) {
+    issueSessions = {};
+  }
+}
+
+async function saveSessions() {
+  try {
+    await fs.writeFile(SESSION_FILE, JSON.stringify(issueSessions, null, 2));
+  } catch (err) {
+    logger.warn(`Failed to save sessions: ${err.message}`);
+  }
+}
+
+// 초기 로드
+loadSessions();
+
 /**
- * Claude Code CLI 실행
+ * Claude Code CLI 실행 (세션 지원)
+ * - sessionId가 있으면 --resume으로 이전 세션 이어서 실행
+ * - 실행 후 session_id를 반환
  */
-async function runClaude(prompt, tools, label) {
+async function runClaude(prompt, tools, label, sessionId = null) {
   const promptFile = path.join(TEMP_DIR, `prompt-${label}-${Date.now()}.txt`);
   const outputFile = path.join(TEMP_DIR, `claude-output-${label}-${Date.now()}.txt`);
 
   await fs.writeFile(promptFile, prompt);
-  logger.info(`Claude Code started (${label})`, { promptLength: prompt.length, tools });
+
+  const resumeFlag = sessionId ? ` --resume "${sessionId}"` : '';
+  logger.info(`Claude Code started (${label})`, {
+    promptLength: prompt.length,
+    tools,
+    resumeSession: sessionId || 'new',
+  });
 
   return new Promise((resolve, reject) => {
-    const cmd = `cd "${config.workspaceDir}" && cat "${promptFile}" | claude -p --allowedTools "${tools}" > "${outputFile}" 2>&1`;
+    const cmd = `cd "${config.workspaceDir}" && cat "${promptFile}" | claude -p --output-format json --allowedTools "${tools}"${resumeFlag} > "${outputFile}" 2>&1`;
 
     exec(cmd, {
       maxBuffer: 10 * 1024 * 1024,
       timeout: config.claude.timeout,
     }, async (error, stdout, stderr) => {
-      let output = '';
+      let rawOutput = '';
       try {
-        output = await fs.readFile(outputFile, 'utf-8');
+        rawOutput = await fs.readFile(outputFile, 'utf-8');
       } catch (_) {
-        output = stderr || '';
+        rawOutput = stderr || '';
       }
 
       // 임시 파일 정리
       await fs.unlink(promptFile).catch(() => {});
       await fs.unlink(outputFile).catch(() => {});
 
+      // JSON 파싱하여 session_id와 result 추출
+      let result = rawOutput;
+      let newSessionId = null;
+
+      try {
+        const parsed = JSON.parse(rawOutput);
+        result = parsed.result || rawOutput;
+        newSessionId = parsed.session_id || null;
+      } catch (_) {
+        // JSON 파싱 실패 시 raw output 사용
+        logger.warn(`Claude output is not JSON (${label}), using raw output`);
+      }
+
       if (error) {
-        logger.error(`Claude Code failed (${label})`, { error: error.message, outputSnippet: output.substring(0, 300) });
-        reject(new Error(`Claude Code error: ${error.message}\nOutput: ${output.substring(0, 500)}`));
+        logger.error(`Claude Code failed (${label})`, { error: error.message, outputSnippet: result.substring(0, 300) });
+        reject(new Error(`Claude Code error: ${error.message}\nOutput: ${result.substring(0, 500)}`));
       } else {
-        logger.info(`Claude Code completed (${label})`, { outputLength: output.length });
-        resolve(output);
+        logger.info(`Claude Code completed (${label})`, { outputLength: result.length, sessionId: newSessionId });
+        resolve({ output: result, sessionId: newSessionId });
       }
     });
   });
@@ -53,8 +99,11 @@ async function runClaude(prompt, tools, label) {
 async function fixIssue(issueData) {
   const { number, title, body, labels } = issueData;
   const { owner, repo } = config;
+  const existingSessionId = issueSessions[number] || null;
 
-  logger.info(`=== Fix agent started for issue #${number}: ${title} ===`);
+  logger.info(`=== Fix agent started for issue #${number}: ${title} ===`, {
+    hasExistingSession: !!existingSessionId,
+  });
 
   // 이슈 댓글 가져오기 (봇 댓글 제외, 사람이 쓴 것만)
   let commentsSection = '';
@@ -73,7 +122,21 @@ async function fixIssue(issueData) {
     logger.warn(`Failed to fetch comments for issue #${number}: ${err.message}`);
   }
 
-  const prompt = `
+  let prompt;
+  if (existingSessionId) {
+    // 이전 세션이 있으면 추가 지시만 전달
+    prompt = `
+이전에 이 이슈를 수정한 적이 있습니다. 이번에 다시 수정 요청이 들어왔습니다.
+
+GitHub Issue #${number}: ${title}
+${commentsSection || '(추가 댓글 없음)'}
+
+이전 수정에서 부족했던 부분이 있거나, 댓글에 새로운 요구사항이 있을 수 있습니다.
+댓글 내용을 우선적으로 확인하고, 이전 수정 내역을 기반으로 추가 수정을 진행해주세요.
+기존에 수정한 파일들을 다시 확인하고, 필요한 부분만 수정하세요.
+`.trim();
+  } else {
+    prompt = `
 GitHub Issue #${number} 자동 처리:
 
 제목: ${title}
@@ -91,8 +154,22 @@ ${body || '(내용 없음)'}${commentsSection}
 
 작업 중 발견한 문제나 불확실한 부분은 명확히 보고해주세요.
 `.trim();
+  }
 
-  const output = await runClaude(prompt, config.claude.allowedTools, `fix-${number}`);
+  const { output, sessionId: newSessionId } = await runClaude(
+    prompt,
+    config.claude.allowedTools,
+    `fix-${number}`,
+    existingSessionId
+  );
+
+  // 세션 ID 저장
+  if (newSessionId) {
+    issueSessions[number] = newSessionId;
+    await saveSessions();
+    logger.info(`Session saved for issue #${number}`, { sessionId: newSessionId });
+  }
+
   logger.info(`Fix agent output for issue #${number}`, { outputSnippet: output.substring(0, 300) });
   return output;
 }
@@ -102,8 +179,11 @@ ${body || '(내용 없음)'}${commentsSection}
  */
 async function refixFromReview(issueData, reviewFeedback, retryCount) {
   const { number, title, body } = issueData;
+  const existingSessionId = issueSessions[number] || null;
 
-  logger.info(`=== Re-fix agent started for issue #${number} (retry ${retryCount}/${config.claude.maxRetries}) ===`);
+  logger.info(`=== Re-fix agent started for issue #${number} (retry ${retryCount}/${config.claude.maxRetries}) ===`, {
+    hasExistingSession: !!existingSessionId,
+  });
 
   const prompt = `
 GitHub Issue #${number} 재수정 요청 (${retryCount}차 재시도):
@@ -130,7 +210,19 @@ ${reviewFeedback}
 반드시 리뷰에서 지적된 문제를 모두 해결해주세요.
 `.trim();
 
-  const output = await runClaude(prompt, config.claude.allowedTools, `refix-${number}-${retryCount}`);
+  const { output, sessionId: newSessionId } = await runClaude(
+    prompt,
+    config.claude.allowedTools,
+    `refix-${number}-${retryCount}`,
+    existingSessionId
+  );
+
+  // 세션 ID 업데이트
+  if (newSessionId) {
+    issueSessions[number] = newSessionId;
+    await saveSessions();
+  }
+
   logger.info(`Re-fix agent output for issue #${number}`, { outputSnippet: output.substring(0, 300) });
   return output;
 }

@@ -94,6 +94,12 @@ async function getIssue(owner, repo, issueNumber) {
   return makeRequest(opts);
 }
 
+async function getIssueComments(owner, repo, issueNumber) {
+  logger.debug(`Fetching comments for issue #${issueNumber}`);
+  const opts = apiOptions('GET', `/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100`);
+  return makeRequest(opts);
+}
+
 // ─── PR 관련 ───
 
 async function createPullRequest(owner, repo, { title, body, head, base }) {
@@ -172,6 +178,7 @@ module.exports = {
   commentOnIssue,
   closeIssue,
   getIssue,
+  getIssueComments,
   createPullRequest,
   mergePullRequest,
   getPullRequest,

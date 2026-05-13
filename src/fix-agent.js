@@ -52,20 +52,38 @@ async function runClaude(prompt, tools, label) {
  */
 async function fixIssue(issueData) {
   const { number, title, body, labels } = issueData;
+  const { owner, repo } = config;
 
   logger.info(`=== Fix agent started for issue #${number}: ${title} ===`);
+
+  // 이슈 댓글 가져오기 (봇 댓글 제외, 사람이 쓴 것만)
+  let commentsSection = '';
+  try {
+    const comments = await githubApi.getIssueComments(owner, repo, number);
+    const humanComments = (Array.isArray(comments) ? comments : [])
+      .filter(c => !c.body.startsWith('🤖') && !c.body.startsWith('🔍') && !c.body.startsWith('🔧') && !c.body.startsWith('❌') && !c.body.startsWith('⚠️') && !c.body.startsWith('🔄') && !c.body.startsWith('📝') && !c.body.startsWith('✅'))
+      .map(c => `[${c.user?.login || 'unknown'}]: ${c.body}`)
+      .join('\n\n');
+
+    if (humanComments) {
+      commentsSection = `\n\n추가 댓글 (최신 피드백 우선 반영):\n${humanComments}`;
+      logger.info(`Issue #${number} has human comments`, { count: humanComments.split('\n\n').length });
+    }
+  } catch (err) {
+    logger.warn(`Failed to fetch comments for issue #${number}: ${err.message}`);
+  }
 
   const prompt = `
 GitHub Issue #${number} 자동 처리:
 
 제목: ${title}
 내용:
-${body || '(내용 없음)'}
+${body || '(내용 없음)'}${commentsSection}
 
 라벨: ${(labels || []).map(l => l.name).join(', ')}
 
 다음 순서로 작업해주세요:
-1. 이슈 내용을 분석하여 문제 파악
+1. 이슈 내용과 댓글을 모두 분석하여 문제 파악 (댓글에 추가 요구사항이 있으면 반드시 반영)
 2. 관련 파일들을 찾아서 읽기
 3. 코드 수정 (버그 수정 또는 기능 구현)
 4. 변경사항 테스트 (빌드 확인)

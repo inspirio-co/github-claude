@@ -211,14 +211,16 @@ async function reviewPR(prNumber, retryCount = 0) {
         }
       }
 
-      // issue close
+      // 이슈를 needs-review 상태로 변경 (사람이 확인 후 직접 close)
       if (issueNumber) {
         try {
-          await githubApi.updateIssueLabels(owner, repo, issueNumber, [config.labels.done]);
-          await githubApi.closeIssue(owner, repo, issueNumber);
-          logger.info(`Issue #${issueNumber} closed after PR merge`);
-        } catch (closeErr) {
-          logger.error(`Failed to close issue #${issueNumber}: ${closeErr.message}`);
+          await githubApi.updateIssueLabels(owner, repo, issueNumber, [config.labels.needsReview]);
+          await githubApi.commentOnIssue(owner, repo, issueNumber,
+            '✅ PR이 머지되었습니다. 수정 결과를 확인한 후 이슈를 닫아주세요.'
+          );
+          logger.info(`Issue #${issueNumber} labeled needs-review for manual verification`);
+        } catch (labelErr) {
+          logger.error(`Failed to update issue #${issueNumber}: ${labelErr.message}`);
         }
       }
 

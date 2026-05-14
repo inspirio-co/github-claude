@@ -154,7 +154,8 @@ async function runClaude(prompt, tools, label, sessionId = null) {
   });
 
   return new Promise((resolve, reject) => {
-    const cmd = `cd "${config.workspaceDir}" && cat "${promptFile}" | claude -p --output-format json --allowedTools "${tools}"${resumeFlag} > "${outputFile}" 2>&1`;
+    const disallowed = config.claude.disallowedTools ? ` --disallowedTools "${config.claude.disallowedTools}"` : '';
+    const cmd = `cd "${config.workspaceDir}" && cat "${promptFile}" | claude -p --output-format json --allowedTools "${tools}"${disallowed}${resumeFlag} > "${outputFile}" 2>&1`;
 
     exec(cmd, {
       maxBuffer: 10 * 1024 * 1024,
@@ -232,11 +233,19 @@ async function fixIssue(issueData) {
   // 이미지 다운로드
   const { imageSection } = await downloadIssueImages(number, allTexts);
 
+  const safetyRules = `
+⚠️ 안전 규칙 (반드시 준수):
+- 작업 경로: ${config.workspaceDir} 내부 파일만 읽기/수정 가능. 이 경로 외부의 파일은 절대 접근하지 마세요.
+- git reset, git clean, git checkout -- ., rm -rf 등 파괴적 명령은 절대 실행하지 마세요.
+- .env, 설정 파일, package.json, package-lock.json은 수정하지 마세요.
+- node_modules/ 디렉토리는 건드리지 마세요.
+`;
+
   let prompt;
   if (existingSessionId) {
     prompt = `
 이전에 이 이슈를 수정한 적이 있습니다. 이번에 다시 수정 요청이 들어왔습니다.
-
+${safetyRules}
 GitHub Issue #${number}: ${title}
 ${commentsSection || '(추가 댓글 없음)'}${imageSection}
 
@@ -247,7 +256,7 @@ ${commentsSection || '(추가 댓글 없음)'}${imageSection}
   } else {
     prompt = `
 GitHub Issue #${number} 자동 처리:
-
+${safetyRules}
 제목: ${title}
 내용:
 ${body || '(내용 없음)'}${commentsSection}${imageSection}
@@ -297,6 +306,12 @@ async function refixFromReview(issueData, reviewFeedback, retryCount) {
 
   const prompt = `
 GitHub Issue #${number} 재수정 요청 (${retryCount}차 재시도):
+
+⚠️ 안전 규칙 (반드시 준수):
+- 작업 경로: ${config.workspaceDir} 내부 파일만 읽기/수정 가능. 이 경로 외부의 파일은 절대 접근하지 마세요.
+- git reset, git clean, git checkout -- ., rm -rf 등 파괴적 명령은 절대 실행하지 마세요.
+- .env, 설정 파일, package.json, package-lock.json은 수정하지 마세요.
+- node_modules/ 디렉토리는 건드리지 마세요.
 
 원래 이슈 제목: ${title}
 원래 이슈 내용:

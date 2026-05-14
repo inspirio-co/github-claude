@@ -47,7 +47,8 @@ DETAILS: (상세 리뷰 내용)
   logger.info(`Review prompt written for PR #${prNumber}`, { promptLength: prompt.length });
 
   return new Promise((resolve, reject) => {
-    const cmd = `cd "${config.workspaceDir}" && cat "${promptFile}" | claude -p --allowedTools "${config.claude.reviewTools}" > "${outputFile}" 2>&1`;
+    const disallowed = config.claude.disallowedTools ? ` --disallowedTools "${config.claude.disallowedTools}"` : '';
+    const cmd = `cd "${config.workspaceDir}" && cat "${promptFile}" | claude -p --allowedTools "${config.claude.reviewTools}"${disallowed} > "${outputFile}" 2>&1`;
 
     exec(cmd, {
       maxBuffer: 10 * 1024 * 1024,

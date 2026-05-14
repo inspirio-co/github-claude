@@ -26,6 +26,7 @@ const config = {
   claude: {
     allowedTools: process.env.CLAUDE_ALLOWED_TOOLS || 'Edit,Write,Glob,Grep,Read',
     reviewTools: process.env.CLAUDE_REVIEW_TOOLS || 'Glob,Grep,Read',
+    disallowedTools: process.env.CLAUDE_DISALLOWED_TOOLS || 'Bash,Task',
     timeout: parseInt(process.env.CLAUDE_TIMEOUT || '600000', 10),
     maxRetries: parseInt(process.env.CLAUDE_MAX_RETRIES || '3', 10),
   },

@@ -140,12 +140,26 @@ loadSessions();
  * - sessionId가 있으면 --resume으로 이전 세션 이어서 실행
  * - 실행 후 session_id를 반환
  */
-async function runClaude(prompt, tools, label, sessionId = null) {
+async function runClaude(prompt, tools, label, sessionId = null, issueNumber = null) {
   return _execClaude(prompt, tools, label, sessionId).catch(async (err) => {
-    // resume 실패 시 새 세션으로 재시도
+    // resume 실패 시 이전 작업 요약을 포함하여 새 세션으로 재시도
     if (sessionId) {
-      logger.warn(`Resume failed for ${label}, retrying without session`, { error: err.message });
-      return _execClaude(prompt, tools, label, null);
+      logger.warn(`Resume failed for ${label}, retrying with context summary`, { error: err.message });
+
+      let contextPrompt = prompt;
+      if (issueNumber && issueSessions[issueNumber]?.lastOutput) {
+        const prevOutput = issueSessions[issueNumber].lastOutput;
+        contextPrompt = `
+[이전 작업 내역 - 세션이 만료되어 요약으로 전달합니다]
+${prevOutput}
+
+---
+
+${prompt}`;
+        logger.info(`Injected previous output summary for issue #${issueNumber}`, { summaryLength: prevOutput.length });
+      }
+
+      return _execClaude(contextPrompt, tools, label, null);
     }
     throw err;
   });
@@ -213,7 +227,8 @@ async function _execClaude(prompt, tools, label, sessionId) {
 async function fixIssue(issueData) {
   const { number, title, body, labels } = issueData;
   const { owner, repo } = config;
-  const existingSessionId = issueSessions[number] || null;
+  const sessionData = issueSessions[number] || null;
+  const existingSessionId = sessionData?.sessionId || null;
 
   logger.info(`=== Fix agent started for issue #${number}: ${title} ===`, {
     hasExistingSession: !!existingSessionId,
@@ -290,12 +305,16 @@ ${body || '(내용 없음)'}${commentsSection}${imageSection}
     prompt,
     config.claude.allowedTools,
     `fix-${number}`,
-    existingSessionId
+    existingSessionId,
+    number
   );
 
-  // 세션 ID 저장
+  // 세션 ID + 출력 요약 저장
   if (newSessionId) {
-    issueSessions[number] = newSessionId;
+    issueSessions[number] = {
+      sessionId: newSessionId,
+      lastOutput: output.substring(0, 3000),
+    };
     await saveSessions();
     logger.info(`Session saved for issue #${number}`, { sessionId: newSessionId });
   }
@@ -309,7 +328,8 @@ ${body || '(내용 없음)'}${commentsSection}${imageSection}
  */
 async function refixFromReview(issueData, reviewFeedback, retryCount) {
   const { number, title, body } = issueData;
-  const existingSessionId = issueSessions[number] || null;
+  const sessionData = issueSessions[number] || null;
+  const existingSessionId = sessionData?.sessionId || null;
 
   logger.info(`=== Re-fix agent started for issue #${number} (retry ${retryCount}/${config.claude.maxRetries}) ===`, {
     hasExistingSession: !!existingSessionId,
@@ -350,12 +370,16 @@ ${reviewFeedback}
     prompt,
     config.claude.allowedTools,
     `refix-${number}-${retryCount}`,
-    existingSessionId
+    existingSessionId,
+    number
   );
 
-  // 세션 ID 업데이트
+  // 세션 ID + 출력 요약 업데이트
   if (newSessionId) {
-    issueSessions[number] = newSessionId;
+    issueSessions[number] = {
+      sessionId: newSessionId,
+      lastOutput: output.substring(0, 3000),
+    };
     await saveSessions();
   }
 

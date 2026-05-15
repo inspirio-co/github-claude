@@ -423,15 +423,26 @@ async function processWithPR(issueData) {
     await gitOps.push(branchName, true);
     logger.info(`Branch ${branchName} pushed for issue #${number}`);
 
-    // 5. PR 생성
-    const pr = await githubApi.createPullRequest(owner, repo, {
-      title: `[#${number}] ${title}`,
-      body: `Related: #${number}\n\n자동 수정 by Claude Code\n\n**변경 요약:**\n${claudeOutput.substring(0, 2000)}`,
-      head: branchName,
-      base: config.baseBranch,
-    });
+    // 5. PR 생성 (기존 PR이 있으면 재사용)
+    let pr;
+    try {
+      const existingPRs = await githubApi.listPullRequestsForBranch(owner, repo, branchName);
+      if (Array.isArray(existingPRs) && existingPRs.length > 0) {
+        pr = existingPRs[0];
+        logger.info(`Existing PR #${pr.number} found for branch ${branchName}, push will trigger review`);
+      }
+    } catch (_) {}
 
-    logger.info(`PR #${pr.number} created for issue #${number}`);
+    if (!pr) {
+      pr = await githubApi.createPullRequest(owner, repo, {
+        title: `[#${number}] ${title}`,
+        body: `Related: #${number}\n\n자동 수정 by Claude Code\n\n**변경 요약:**\n${claudeOutput.substring(0, 2000)}`,
+        head: branchName,
+        base: config.baseBranch,
+      });
+      logger.info(`PR #${pr.number} created for issue #${number}`);
+    }
+
     await githubApi.commentOnIssue(owner, repo, number,
       `🔧 코드 수정이 완료되었습니다. PR #${pr.number} 이 생성되었습니다.\n\n` +
       `**변경 요약:**\n\`\`\`\n${claudeOutput.substring(0, 500)}${claudeOutput.length > 500 ? '...' : ''}\n\`\`\``

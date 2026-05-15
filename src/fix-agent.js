@@ -141,8 +141,20 @@ loadSessions();
  * - 실행 후 session_id를 반환
  */
 async function runClaude(prompt, tools, label, sessionId = null) {
-  const promptFile = path.join(TEMP_DIR, `prompt-${label}-${Date.now()}.txt`);
-  const outputFile = path.join(TEMP_DIR, `claude-output-${label}-${Date.now()}.txt`);
+  return _execClaude(prompt, tools, label, sessionId).catch(async (err) => {
+    // resume 실패 시 새 세션으로 재시도
+    if (sessionId) {
+      logger.warn(`Resume failed for ${label}, retrying without session`, { error: err.message });
+      return _execClaude(prompt, tools, label, null);
+    }
+    throw err;
+  });
+}
+
+async function _execClaude(prompt, tools, label, sessionId) {
+  const ts = Date.now();
+  const promptFile = path.join(TEMP_DIR, `prompt-${label}-${ts}.txt`);
+  const outputFile = path.join(TEMP_DIR, `claude-output-${label}-${ts}.txt`);
 
   await fs.writeFile(promptFile, prompt);
 
@@ -181,7 +193,6 @@ async function runClaude(prompt, tools, label, sessionId = null) {
         result = parsed.result || rawOutput;
         newSessionId = parsed.session_id || null;
       } catch (_) {
-        // JSON 파싱 실패 시 raw output 사용
         logger.warn(`Claude output is not JSON (${label}), using raw output`);
       }
 

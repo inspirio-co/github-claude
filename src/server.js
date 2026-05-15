@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const express = require('express');
 const fs = require('fs').promises;
 const path = require('path');
-const { handleGitHubEvent } = require('./webhook-handler');
+const { handleGitHubEvent, recoverPendingTasks } = require('./webhook-handler');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -120,4 +120,11 @@ app.listen(config.port, () => {
   console.log(`  Health: http://localhost:${config.port}/health`);
   console.log(`  Status: http://localhost:${config.port}/status`);
   console.log(`  Logs:   http://localhost:${config.port}/logs`);
+
+  // 서버 시작 5초 후 미처리 작업 복구
+  setTimeout(() => {
+    recoverPendingTasks().catch(err => {
+      logger.error('Startup recovery failed', { error: err.message });
+    });
+  }, 5000);
 });

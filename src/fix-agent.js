@@ -204,7 +204,7 @@ async function _execClaude(prompt, tools, label, sessionId) {
 
       try {
         const parsed = JSON.parse(rawOutput);
-        result = parsed.result || rawOutput;
+        result = (parsed.result != null && parsed.result !== '') ? parsed.result : `Claude가 ${parsed.num_turns || '?'}턴 동안 코드를 분석했으나 최종 결과 메시지가 비어있습니다.`;
         newSessionId = parsed.session_id || null;
       } catch (_) {
         logger.warn(`Claude output is not JSON (${label}), using raw output`);

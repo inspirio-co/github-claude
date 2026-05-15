@@ -215,4 +215,105 @@ async function handlePullRequestEvent(payload) {
   return { handled: false };
 }
 
-module.exports = { handleGitHubEvent };
+/**
+ * 서버 시작 시 미처리 이슈/PR 복구
+ * - auto-fix 라벨이 있지만 status/* 라벨이 없는 이슈 → fix 트리거
+ * - auto-fix/* 브랜치의 열린 PR 중 리뷰되지 않은 것 → review 트리거
+ */
+async function recoverPendingTasks() {
+  const { owner, repo } = config;
+
+  try {
+    // 1. auto-fix 라벨이 있는 열린 이슈 확인
+    const issues = await githubApi.listIssues(owner, repo, {
+      state: 'open',
+      labels: config.labels.trigger,
+    });
+
+    // PR은 제외 (GitHub API에서 PR도 issue로 반환됨)
+    const realIssues = issues.filter(i => !i.pull_request);
+
+    for (const issue of realIssues) {
+      const labelNames = issue.labels.map(l => l.name);
+      const hasStatusLabel = labelNames.some(l =>
+        l === config.labels.inProgress ||
+        l === config.labels.done ||
+        l === config.labels.needsReview
+      );
+
+      if (!hasStatusLabel) {
+        logger.info(`Recovery: re-triggering issue #${issue.number} (${issue.title})`);
+
+        const issueData = {
+          number: issue.number,
+          title: issue.title,
+          body: issue.body,
+          labels: issue.labels,
+        };
+
+        enqueueTask(async () => {
+          if (config.features.pr) {
+            await processFlowA(issueData);
+          } else {
+            await processSimpleFix(issueData);
+          }
+        }, `fix-issue-${issue.number}`).catch(error => {
+          logger.error(`Recovery: error processing issue #${issue.number}`, { error: error.message });
+        });
+      }
+    }
+
+    // 2. auto-fix 브랜치의 열린 PR 중 리뷰 필요한 것 확인
+    if (config.features.review) {
+      const prs = await githubApi.listIssues(owner, repo, { state: 'open' });
+      const openPRs = prs.filter(i => i.pull_request);
+
+      for (const prIssue of openPRs) {
+        const pr = await githubApi.getPullRequest(owner, repo, prIssue.number);
+        const branchName = pr.head?.ref || '';
+
+        if (!branchName.startsWith(config.branchPrefix + '/')) continue;
+
+        // 이미 큐에 fix 작업이 있으면 skip
+        const issueMatch = pr.body?.match(/#(\d+)/);
+        const linkedIssueNum = issueMatch ? parseInt(issueMatch[1]) : null;
+        const linkedIssueInQueue = linkedIssueNum && realIssues.some(i => i.number === linkedIssueNum);
+        if (linkedIssueInQueue) continue;
+
+        // 연결된 이슈가 needs-review 상태이면 skip (이미 max retries 도달)
+        if (linkedIssueNum) {
+          try {
+            const linkedIssue = await githubApi.getIssue(owner, repo, linkedIssueNum);
+            const hasNeedsReview = linkedIssue.labels?.some(l => l.name === config.labels.needsReview);
+            if (hasNeedsReview) {
+              logger.info(`Recovery: skipping PR #${pr.number} (linked issue #${linkedIssueNum} is needs-review)`);
+              continue;
+            }
+          } catch (_) {}
+        }
+
+        logger.info(`Recovery: re-triggering review for PR #${pr.number} (${pr.title})`);
+
+        enqueueTask(async () => {
+          const retryCount = prRetryCount.get(pr.number) || 0;
+          const result = await reviewAgent.reviewPR(pr.number, retryCount);
+          logger.info(`Recovery: review result for PR #${pr.number}`, result);
+
+          if (result.verdict === 'REQUEST_CHANGES' && result.retryCount != null) {
+            prRetryCount.set(pr.number, result.retryCount);
+          } else {
+            prRetryCount.delete(pr.number);
+          }
+        }, `review-pr-${pr.number}`).catch(error => {
+          logger.error(`Recovery: review error for PR #${pr.number}`, { error: error.message });
+        });
+      }
+    }
+
+    logger.info('Recovery check completed');
+  } catch (error) {
+    logger.error('Recovery check failed', { error: error.message });
+  }
+}
+
+module.exports = { handleGitHubEvent, recoverPendingTasks };

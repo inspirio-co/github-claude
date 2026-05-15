@@ -171,6 +171,13 @@ async function deleteBranch(owner, repo, branch) {
   });
 }
 
+async function listIssues(owner, repo, { state = 'open', labels = '', per_page = 30 } = {}) {
+  logger.debug(`Listing issues`, { state, labels });
+  const params = `state=${state}&labels=${encodeURIComponent(labels)}&per_page=${per_page}`;
+  const opts = apiOptions('GET', `/repos/${owner}/${repo}/issues?${params}`);
+  return makeRequest(opts);
+}
+
 module.exports = {
   updateIssueLabels,
   addLabel,
@@ -179,6 +186,7 @@ module.exports = {
   closeIssue,
   getIssue,
   getIssueComments,
+  listIssues,
   createPullRequest,
   mergePullRequest,
   getPullRequest,

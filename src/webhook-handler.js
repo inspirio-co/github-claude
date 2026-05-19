@@ -30,16 +30,11 @@ async function processQueue() {
   logger.info(`Task started: ${label} (remaining: ${taskQueue.length})`);
 
   try {
-    // 작업 시작 전 워크스페이스 정리
+    // 작업 시작 전 base 브랜치로 전환만 수행 (로컬 변경사항은 보존)
     try {
-      await gitOps.run('git checkout -- .');
       await gitOps.run(`git checkout ${config.baseBranch}`);
     } catch (cleanErr) {
-      logger.warn(`Workspace cleanup before task: ${cleanErr.message}`);
-      try {
-        await gitOps.resetHard('HEAD');
-        await gitOps.run(`git checkout ${config.baseBranch}`);
-      } catch (_) {}
+      logger.warn(`Branch checkout before task: ${cleanErr.message}`);
     }
 
     const result = await fn();

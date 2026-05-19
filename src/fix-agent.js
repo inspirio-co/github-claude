@@ -265,6 +265,7 @@ async function fixIssue(issueData) {
 - git reset, git clean, git checkout -- ., rm -rf 등 파괴적 명령은 절대 실행하지 마세요.
 - .env, 설정 파일, package.json, package-lock.json은 수정하지 마세요.
 - node_modules/ 디렉토리는 건드리지 마세요.
+- 이 워크스페이스에서 다른 개발자가 병렬로 작업 중일 수 있습니다. 다른 사람의 변경사항과 충돌하지 않도록 이슈에 해당하는 파일만 최소한으로 수정하세요.
 `;
 
   let prompt;
@@ -355,6 +356,7 @@ GitHub Issue #${number} 재수정 요청 (${retryCount}차 재시도):
 - git reset, git clean, git checkout -- ., rm -rf 등 파괴적 명령은 절대 실행하지 마세요.
 - .env, 설정 파일, package.json, package-lock.json은 수정하지 마세요.
 - node_modules/ 디렉토리는 건드리지 마세요.
+- 이 워크스페이스에서 다른 개발자가 병렬로 작업 중일 수 있습니다. 다른 사람의 변경사항과 충돌하지 않도록 이슈에 해당하는 파일만 최소한으로 수정하세요.
 
 원래 이슈 제목: ${title}
 원래 이슈 내용:

@@ -7,6 +7,7 @@ const githubApi = require('./github-api');
 const gitOps = require('./git-ops');
 const fixAgent = require('./fix-agent');
 const buildDeploy = require('./build-deploy');
+const qaAgent = require('./qa-agent');
 
 const TEMP_DIR = path.join(__dirname, '..');
 
@@ -214,8 +215,42 @@ async function reviewPR(prNumber, retryCount = 0) {
         }
       }
 
-      // 이슈를 needs-review 상태로 변경 (사람이 확인 후 직접 close)
-      if (issueNumber) {
+      // QA 실행 (활성화된 경우)
+      let qaResult = null;
+      if (config.features.qa && issueNumber && issueBody) {
+        try {
+          await githubApi.commentOnIssue(owner, repo, issueNumber,
+            '🧪 QuestCode QA를 실행합니다...'
+          );
+          qaResult = await qaAgent.runQAAfterMerge(issueNumber, issueBody);
+
+          if (qaResult.skipped) {
+            logger.info(`QA skipped for issue #${issueNumber}: ${qaResult.reason}`);
+          } else if (qaResult.passed) {
+            const reportMsg = qaResult.reportSummary
+              ? `\n\n${qaResult.reportSummary}`
+              : '';
+            await githubApi.commentOnIssue(owner, repo, issueNumber,
+              `✅ QA 테스트를 통과했습니다.${reportMsg}`
+            );
+          } else {
+            const reportMsg = qaResult.reportSummary
+              ? `\n\n${qaResult.reportSummary}`
+              : '';
+            await githubApi.commentOnIssue(owner, repo, issueNumber,
+              `❌ QA 테스트 실패. 신규 이슈가 생성되었습니다.${qaResult.failureIssue ? ` (#${qaResult.failureIssue.number})` : ''}${reportMsg}`
+            );
+          }
+        } catch (qaErr) {
+          logger.error(`QA execution error for issue #${issueNumber}`, { error: qaErr.message });
+          await githubApi.commentOnIssue(owner, repo, issueNumber,
+            `⚠️ QA 실행 중 오류:\n\n\`\`\`\n${qaErr.message.substring(0, 500)}\n\`\`\``
+          );
+        }
+      }
+
+      // 이슈를 needs-review 상태로 변경 (QA 통과 또는 스킵된 경우)
+      if (issueNumber && (!qaResult || qaResult.skipped || qaResult.passed)) {
         try {
           await githubApi.updateIssueLabels(owner, repo, issueNumber, [config.labels.needsReview]);
           await githubApi.commentOnIssue(owner, repo, issueNumber,

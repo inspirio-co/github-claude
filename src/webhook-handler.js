@@ -4,6 +4,7 @@ const githubApi = require('./github-api');
 const fixAgent = require('./fix-agent');
 const reviewAgent = require('./review-agent');
 const gitOps = require('./git-ops');
+const { parseRetryCount } = require('./qa-agent');
 
 // PR별 retryCount 추적 (메모리)
 const prRetryCount = new Map();
@@ -91,7 +92,19 @@ async function handleIssueEvent(payload) {
     return { handled: false };
   }
 
+  // 이슈가 open 상태가 아니면 무시 (닫힌 이슈에 실수로 라벨 추가한 경우 등)
+  if (issue.state !== 'open') {
+    logger.info(`Issue #${issue.number} is not open (state: ${issue.state}), skipping auto-fix`);
+    return { handled: false };
+  }
+
   const issueNumber = issue.number;
+
+  // QA 재시도 횟수 파싱
+  const { retryCount: qaRetryCount, originalIssue } = parseRetryCount(issue.body);
+  if (qaRetryCount > 0) {
+    logger.info(`Issue #${issueNumber} is QA retry ${qaRetryCount} from #${originalIssue}`);
+  }
 
   const issueData = {
     number: issue.number,
@@ -99,6 +112,8 @@ async function handleIssueEvent(payload) {
     body: issue.body,
     labels: issue.labels,
     repository: payload.repository,
+    qaRetryCount,
+    qaOriginalIssue: originalIssue,
   };
 
   logger.info(`>>> Fix agent triggered: issue #${issueNumber}`);

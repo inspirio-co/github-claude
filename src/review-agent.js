@@ -304,9 +304,12 @@ async function reviewPR(prNumber, retryCount = 0) {
         `🔄 리뷰 피드백을 반영하여 자동 재수정을 시작합니다. (${nextRetry}/${config.claude.maxRetries}차 시도)`
       );
 
-      // PR의 브랜치로 체크아웃
+      // PR의 브랜치로 체크아웃 (로컬 변경사항 충돌 방지를 위해 stash)
       const branchName = pr.head.ref;
+      let stashed = false;
+      try { stashed = await gitOps.stash(); } catch (_) {}
       await gitOps.checkout(branchName);
+      if (stashed) { await gitOps.stashDrop(); }
 
       const issueData = { number: issueNumber || prNumber, title: issueTitle, body: issueBody };
       const refixOutput = await fixAgent.refixFromReview(issueData, reviewOutput, nextRetry);

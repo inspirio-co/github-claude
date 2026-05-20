@@ -379,6 +379,11 @@ ${reviewFeedback}
 
 반드시 리뷰에서 지적된 문제를 모두 해결해주세요.
 
+⚠️ 인코딩/글자 깨짐(mojibake) 수정 시 주의:
+- Edit 도구는 깨진 유니코드 문자(�, \uFFFD)를 old_string으로 매칭할 수 없습니다.
+- 깨진 문자가 있는 파일은 반드시 Read 도구로 전체 내용을 읽은 후, Write 도구로 파일 전체를 올바른 내용으로 다시 작성하세요.
+- Edit 도구로 시도하지 말고, 처음부터 Write 도구를 사용하세요.
+
 ⚠️ 수정 범위 제한 (매우 중요):
 - 리뷰에서 지적된 문제만 수정하세요. 그 외 코드는 절대 건드리지 마세요.
 - 리팩토링, 코드 정리, 주석 추가, 포맷팅 변경 등 지적되지 않은 개선은 하지 마세요.
@@ -423,12 +428,20 @@ async function processWithPR(issueData) {
     logger.info(`Creating branch ${branchName} for issue #${number}`);
     await gitOps.checkoutNew(branchName, config.baseBranch);
 
-    // 3. Claude Code로 수정
+    // 3. 수정 전 dirty 파일 스냅샷 (다른 이슈의 잔여 변경 식별용)
+    const dirtyBefore = new Set(await gitOps.getModifiedFiles());
+    if (dirtyBefore.size > 0) {
+      logger.warn(`Pre-existing dirty files before fix (issue #${number})`, { files: [...dirtyBefore] });
+    }
+
+    // 4. Claude Code로 수정
     const claudeOutput = await fixIssue(issueData);
 
-    // 4. 변경사항 커밋 & 푸시
-    const hasChanges = await gitOps.hasChanges();
-    if (!hasChanges) {
+    // 5. Claude가 변경한 파일만 추출 (기존 dirty 파일 제외)
+    const allDirty = await gitOps.getModifiedFiles();
+    const claudeFiles = allDirty.filter(f => !dirtyBefore.has(f));
+
+    if (claudeFiles.length === 0) {
       logger.warn(`No changes detected for issue #${number}`);
       await githubApi.commentOnIssue(owner, repo, number,
         '⚠️ Claude가 코드를 분석했으나 변경사항이 없습니다.\n\n' +
@@ -438,7 +451,13 @@ async function processWithPR(issueData) {
       return { success: false, reason: 'no-changes' };
     }
 
-    await gitOps.commit(`[#${number}] ${title}`);
+    // Claude가 수정한 파일만 커밋 (다른 이슈의 잔여 변경 제외)
+    let summary = claudeOutput;
+    if (claudeOutput.includes('비어있습니다')) {
+      summary = `변경된 파일 (${claudeFiles.length}개):\n${claudeFiles.map(f => '- ' + f).join('\n')}`;
+    }
+
+    await gitOps.commit(`[#${number}] ${title}`, claudeFiles);
     await gitOps.push(branchName, true);
     logger.info(`Branch ${branchName} pushed for issue #${number}`);
 
@@ -455,7 +474,7 @@ async function processWithPR(issueData) {
     if (!pr) {
       pr = await githubApi.createPullRequest(owner, repo, {
         title: `[#${number}] ${title}`,
-        body: `Related: #${number}\n\n자동 수정 by Claude Code\n\n**변경 요약:**\n${claudeOutput.substring(0, 2000)}`,
+        body: `Related: #${number}\n\n자동 수정 by Claude Code\n\n**변경 요약:**\n${summary.substring(0, 2000)}`,
         head: branchName,
         base: config.baseBranch,
       });
@@ -464,7 +483,7 @@ async function processWithPR(issueData) {
 
     await githubApi.commentOnIssue(owner, repo, number,
       `🔧 코드 수정이 완료되었습니다. PR #${pr.number} 이 생성되었습니다.\n\n` +
-      `**변경 요약:**\n\`\`\`\n${claudeOutput.substring(0, 500)}${claudeOutput.length > 500 ? '...' : ''}\n\`\`\``
+      `**변경 요약:**\n\`\`\`\n${summary.substring(0, 500)}${summary.length > 500 ? '...' : ''}\n\`\`\``
     );
 
     return { success: true, prNumber: pr.number, branchName };

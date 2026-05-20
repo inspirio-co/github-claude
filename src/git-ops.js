@@ -48,7 +48,7 @@ async function stageAll() {
   await run('git add -A');
 }
 
-async function commit(message) {
+async function commit(message, files = null) {
   logger.info(`Committing: ${message.substring(0, 80)}`);
   // 변경사항이 없으면 스킵
   try {
@@ -61,7 +61,13 @@ async function commit(message) {
     // git status 실패 시 그냥 진행
   }
 
-  await run('git add -A');
+  if (files && files.length > 0) {
+    const escaped = files.map(f => `"${f.replace(/"/g, '\\"')}"`).join(' ');
+    await run(`git add -- ${escaped}`);
+    logger.info(`Staged ${files.length} specific files`, { files });
+  } else {
+    await run('git add -A');
+  }
   await run(`git commit -m "${message.replace(/"/g, '\\"')}"`);
   logger.info('Commit created');
   return true;
@@ -105,6 +111,34 @@ async function getLatestCommitMessage() {
   return msg;
 }
 
+async function getModifiedFiles() {
+  const status = await run('git status --porcelain');
+  if (!status) return [];
+  return status.split('\n')
+    .filter(Boolean)
+    .map(line => {
+      const file = line.slice(3);
+      const arrowIdx = file.indexOf(' -> ');
+      return arrowIdx >= 0 ? file.slice(arrowIdx + 4) : file;
+    })
+    .filter(Boolean);
+}
+
+async function stash() {
+  const status = await run('git status --porcelain');
+  if (!status) return false;
+  await run('git stash --include-untracked');
+  logger.info('Working tree stashed');
+  return true;
+}
+
+async function stashDrop() {
+  try {
+    await run('git stash drop');
+    logger.info('Stash dropped');
+  } catch (_) {}
+}
+
 module.exports = {
   run,
   checkout,
@@ -115,6 +149,9 @@ module.exports = {
   pull,
   getCurrentBranch,
   hasChanges,
+  getModifiedFiles,
+  stash,
+  stashDrop,
   resetHard,
   getLatestCommitMessage,
 };

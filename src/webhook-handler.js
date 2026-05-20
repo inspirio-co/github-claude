@@ -1,3 +1,5 @@
+const fs = require('fs').promises;
+const path = require('path');
 const config = require('./config');
 const logger = require('./logger');
 const githubApi = require('./github-api');
@@ -6,8 +8,37 @@ const reviewAgent = require('./review-agent');
 const gitOps = require('./git-ops');
 const { parseRetryCount } = require('./qa-agent');
 
-// PR별 retryCount 추적 (메모리)
+// PR별 retryCount 추적 (파일 기반 영속화)
 const prRetryCount = new Map();
+const RETRY_COUNT_FILE = path.join(__dirname, '..', 'retry-counts.json');
+
+async function loadRetryCounts() {
+  try {
+    const data = await fs.readFile(RETRY_COUNT_FILE, 'utf-8');
+    const obj = JSON.parse(data);
+    for (const [k, v] of Object.entries(obj)) {
+      prRetryCount.set(parseInt(k), v);
+    }
+    logger.info('Retry counts loaded', { count: prRetryCount.size });
+  } catch (_) {
+    // 파일이 없거나 파싱 실패 시 빈 상태로 시작
+  }
+}
+
+async function saveRetryCounts() {
+  try {
+    const obj = {};
+    for (const [k, v] of prRetryCount.entries()) {
+      obj[k] = v;
+    }
+    await fs.writeFile(RETRY_COUNT_FILE, JSON.stringify(obj, null, 2));
+  } catch (err) {
+    logger.warn(`Failed to save retry counts: ${err.message}`);
+  }
+}
+
+// 초기 로드
+loadRetryCounts();
 
 // 순차 처리 큐
 const taskQueue = [];
@@ -208,12 +239,13 @@ async function handlePullRequestEvent(payload) {
       const result = await reviewAgent.reviewPR(prNumber, retryCount);
       logger.info(`Review agent result for PR #${prNumber}`, result);
 
-      // retryCount 업데이트
+      // retryCount 업데이트 및 영속화
       if (result.verdict === 'REQUEST_CHANGES' && result.retryCount != null) {
         prRetryCount.set(prNumber, result.retryCount);
       } else {
         prRetryCount.delete(prNumber);
       }
+      await saveRetryCounts();
     }, `review-pr-${prNumber}`).catch(error => {
       logger.error(`Review agent error for PR #${prNumber}`, { error: error.message, stack: error.stack });
     });
@@ -314,6 +346,7 @@ async function recoverPendingTasks() {
           } else {
             prRetryCount.delete(pr.number);
           }
+          await saveRetryCounts();
         }, `review-pr-${pr.number}`).catch(error => {
           logger.error(`Recovery: review error for PR #${pr.number}`, { error: error.message });
         });

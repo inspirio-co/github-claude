@@ -149,6 +149,12 @@ async function reviewPR(prNumber, retryCount = 0) {
         issueTitle = issue.title;
         issueBody = issue.body || '';
         logger.info(`Linked issue #${issueNumber}: ${issueTitle}`);
+
+        // 이미 닫힌 이슈면 리뷰 스킵
+        if (issue.state !== 'open') {
+          logger.info(`Linked issue #${issueNumber} is already closed, skipping review for PR #${prNumber}`);
+          return { verdict: 'SKIP', reason: 'issue-closed' };
+        }
       } catch (err) {
         logger.warn(`Could not fetch linked issue #${issueNumber}: ${err.message}`);
       }
@@ -249,15 +255,20 @@ async function reviewPR(prNumber, retryCount = 0) {
         }
       }
 
-      // 이슈 완료 처리 (QA 통과 또는 스킵된 경우)
+      // 이슈를 needs-review 상태로 변경 (QA 통과 또는 스킵된 경우)
+      // 단, 이미 닫힌 이슈는 라벨을 변경하지 않음
       if (issueNumber && (!qaResult || qaResult.skipped || qaResult.passed)) {
         try {
-          await githubApi.updateIssueLabels(owner, repo, issueNumber, [config.labels.done]);
-          await githubApi.commentOnIssue(owner, repo, issueNumber,
-            '✅ PR이 머지되었습니다. 이슈를 완료 처리합니다.'
-          );
-          await githubApi.closeIssue(owner, repo, issueNumber);
-          logger.info(`Issue #${issueNumber} labeled done and closed`);
+          const linkedIssue = await githubApi.getIssue(owner, repo, issueNumber);
+          if (linkedIssue.state === 'open') {
+            await githubApi.updateIssueLabels(owner, repo, issueNumber, [config.labels.needsReview]);
+            await githubApi.commentOnIssue(owner, repo, issueNumber,
+              '✅ PR이 머지되었습니다. 수정 결과를 확인한 후 이슈를 닫아주세요.'
+            );
+            logger.info(`Issue #${issueNumber} labeled needs-review for manual verification`);
+          } else {
+            logger.info(`Issue #${issueNumber} is already closed (state: ${linkedIssue.state}), skipping label update`);
+          }
         } catch (labelErr) {
           logger.error(`Failed to update issue #${issueNumber}: ${labelErr.message}`);
         }

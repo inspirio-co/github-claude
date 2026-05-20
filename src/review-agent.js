@@ -249,14 +249,15 @@ async function reviewPR(prNumber, retryCount = 0) {
         }
       }
 
-      // 이슈를 needs-review 상태로 변경 (QA 통과 또는 스킵된 경우)
+      // 이슈 완료 처리 (QA 통과 또는 스킵된 경우)
       if (issueNumber && (!qaResult || qaResult.skipped || qaResult.passed)) {
         try {
-          await githubApi.updateIssueLabels(owner, repo, issueNumber, [config.labels.needsReview]);
+          await githubApi.updateIssueLabels(owner, repo, issueNumber, [config.labels.done]);
           await githubApi.commentOnIssue(owner, repo, issueNumber,
-            '✅ PR이 머지되었습니다. 수정 결과를 확인한 후 이슈를 닫아주세요.'
+            '✅ PR이 머지되었습니다. 이슈를 완료 처리합니다.'
           );
-          logger.info(`Issue #${issueNumber} labeled needs-review for manual verification`);
+          await githubApi.closeIssue(owner, repo, issueNumber);
+          logger.info(`Issue #${issueNumber} labeled done and closed`);
         } catch (labelErr) {
           logger.error(`Failed to update issue #${issueNumber}: ${labelErr.message}`);
         }

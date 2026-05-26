@@ -176,10 +176,81 @@ async function reviewPR(prNumber, retryCount = 0) {
       `📝 **코드 리뷰 결과: ${verdict}**\n\n${reviewOutput.substring(0, 3000)}${reviewOutput.length > 3000 ? '\n...(truncated)' : ''}`
     );
 
-    // 4. APPROVE → merge → build/deploy → close issue
+    // 4. APPROVE → 머지 전 빌드 검증 → merge → deploy
     if (verdict === 'APPROVE') {
-      logger.info(`PR #${prNumber} approved, merging...`);
+      logger.info(`PR #${prNumber} approved, verifying build before merge...`);
 
+      // 머지 전 빌드 검증: PR 브랜치에서 빌드 확인
+      if (config.features.build && config.buildCommand) {
+        let stashed = false;
+        try {
+          try { stashed = await gitOps.stash(); } catch (_) {}
+          await gitOps.checkout(pr.head.ref);
+          if (stashed) { await gitOps.stashDrop(); stashed = false; }
+
+          await buildDeploy.runBuild();
+          logger.info(`Pre-merge build passed for PR #${prNumber}`);
+        } catch (buildErr) {
+          logger.error(`Pre-merge build failed for PR #${prNumber}`, { error: buildErr.message });
+          await githubApi.commentOnIssue(owner, repo, prNumber,
+            `❌ **머지 전 빌드 실패** — 코드 리뷰는 통과했으나 빌드에 실패하여 머지를 중단합니다.\n\n\`\`\`\n${buildErr.message.substring(0, 500)}\n\`\`\``
+          );
+
+          // main으로 복귀
+          try { await gitOps.checkout(config.baseBranch); } catch (_) {}
+          if (stashed) { try { await gitOps.stashDrop(); } catch (_) {} }
+
+          // 빌드 실패를 REQUEST_CHANGES로 처리하여 refix 루프 진입
+          if (retryCount < config.claude.maxRetries) {
+            const nextRetry = retryCount + 1;
+            await githubApi.commentOnIssue(owner, repo, prNumber,
+              `🔄 빌드 실패를 수정하기 위해 자동 재수정을 시작합니다. (${nextRetry}/${config.claude.maxRetries}차 시도)`
+            );
+
+            const branchName = pr.head.ref;
+            let stashed2 = false;
+            try { stashed2 = await gitOps.stash(); } catch (_) {}
+            await gitOps.checkout(branchName);
+            if (stashed2) { await gitOps.stashDrop(); }
+
+            const buildFeedback = `빌드 실패 오류:\n\n${buildErr.message.substring(0, 2000)}\n\n이 빌드 오류를 수정해주세요. import 경로, 누락된 파일, 타입 에러 등을 확인하세요.`;
+            const issueData = { number: issueNumber || prNumber, title: issueTitle, body: issueBody };
+            const refixOutput = await fixAgent.refixFromReview(issueData, buildFeedback, nextRetry);
+
+            const hasChanges = await gitOps.hasChanges();
+            if (hasChanges) {
+              await gitOps.commit(`[#${issueNumber || prNumber}] build fix (retry ${nextRetry})`);
+              await gitOps.push(branchName, true);
+              await githubApi.commentOnIssue(owner, repo, prNumber,
+                `🤖 빌드 오류 수정 완료 (${nextRetry}차).\n\n**수정 내용:**\n\`\`\`\n${refixOutput.substring(0, 500)}${refixOutput.length > 500 ? '...' : ''}\n\`\`\``
+              );
+            } else {
+              await githubApi.commentOnIssue(owner, repo, prNumber,
+                '⚠️ 빌드 오류 재수정 후에도 변경사항이 없습니다. 수동 검토가 필요합니다.'
+              );
+              if (issueNumber) {
+                await githubApi.updateIssueLabels(owner, repo, issueNumber, [config.labels.needsReview]);
+              }
+            }
+
+            try { await gitOps.checkout(config.baseBranch); } catch (_) {}
+            return { verdict: 'BUILD_FAILED', retryCount: nextRetry };
+          } else {
+            await githubApi.commentOnIssue(owner, repo, prNumber,
+              `⚠️ 빌드 실패 — 최대 재시도 횟수(${config.claude.maxRetries})를 초과했습니다. 수동 검토가 필요합니다.`
+            );
+            if (issueNumber) {
+              await githubApi.updateIssueLabels(owner, repo, issueNumber, [config.labels.needsReview]);
+            }
+            return { verdict: 'BUILD_FAILED', maxRetriesReached: true };
+          }
+        }
+
+        // 빌드 성공 — main으로 복귀 후 머지 진행
+        try { await gitOps.checkout(config.baseBranch); } catch (_) {}
+      }
+
+      // 머지
       try {
         await githubApi.mergePullRequest(owner, repo, prNumber);
         logger.info(`PR #${prNumber} merged successfully`);
@@ -199,11 +270,12 @@ async function reviewPR(prNumber, retryCount = 0) {
         logger.error(`Pull failed after merge: ${pullErr.message}`);
       }
 
-      // build/deploy
+      // 배포 (빌드는 머지 전에 이미 검증됨)
       if (config.features.build && config.buildCommand) {
         try {
+          // 머지 후 main에서 다시 빌드 + 배포
           await buildDeploy.runBuild();
-          logger.info(`Build completed after PR #${prNumber} merge`);
+          logger.info(`Post-merge build completed for PR #${prNumber}`);
 
           if (config.deployCommand) {
             await buildDeploy.runDeploy();
@@ -214,7 +286,7 @@ async function reviewPR(prNumber, retryCount = 0) {
             '✅ 빌드 및 배포가 완료되었습니다.'
           );
         } catch (buildErr) {
-          logger.error(`Build/deploy failed after PR #${prNumber} merge`, { error: buildErr.message });
+          logger.error(`Post-merge build/deploy failed for PR #${prNumber}`, { error: buildErr.message });
           await githubApi.commentOnIssue(owner, repo, prNumber,
             `⚠️ 빌드/배포 중 오류:\n\n\`\`\`\n${buildErr.message.substring(0, 500)}\n\`\`\``
           );

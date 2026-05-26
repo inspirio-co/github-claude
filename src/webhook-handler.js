@@ -240,7 +240,7 @@ async function handlePullRequestEvent(payload) {
       logger.info(`Review agent result for PR #${prNumber}`, result);
 
       // retryCount 업데이트 및 영속화
-      if (result.verdict === 'REQUEST_CHANGES' && result.retryCount != null) {
+      if ((result.verdict === 'REQUEST_CHANGES' || result.verdict === 'BUILD_FAILED') && result.retryCount != null) {
         prRetryCount.set(prNumber, result.retryCount);
       } else {
         prRetryCount.delete(prNumber);
@@ -341,7 +341,7 @@ async function recoverPendingTasks() {
           const result = await reviewAgent.reviewPR(pr.number, retryCount);
           logger.info(`Recovery: review result for PR #${pr.number}`, result);
 
-          if (result.verdict === 'REQUEST_CHANGES' && result.retryCount != null) {
+          if ((result.verdict === 'REQUEST_CHANGES' || result.verdict === 'BUILD_FAILED') && result.retryCount != null) {
             prRetryCount.set(pr.number, result.retryCount);
           } else {
             prRetryCount.delete(pr.number);

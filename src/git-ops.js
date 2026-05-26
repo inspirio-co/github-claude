@@ -112,16 +112,25 @@ async function getLatestCommitMessage() {
 }
 
 async function getModifiedFiles() {
-  const status = await run('git status --porcelain');
-  if (!status) return [];
-  return status.split('\n')
-    .filter(Boolean)
-    .map(line => {
-      const file = line.slice(3);
-      const arrowIdx = file.indexOf(' -> ');
-      return arrowIdx >= 0 ? file.slice(arrowIdx + 4) : file;
-    })
-    .filter(Boolean);
+  // run()은 stdout.trim()하므로 porcelain의 leading space가 사라짐
+  // " M src/file" → trim → "M src/file" → slice(3) → "rc/file" (잘림!)
+  // 이를 방지하기 위해 exec를 직접 사용하여 raw stdout 보존
+  const workDir = config.workspaceDir;
+  return new Promise((resolve) => {
+    exec('git status --porcelain', { cwd: workDir, maxBuffer: 10 * 1024 * 1024, timeout: 30000 }, (error, stdout) => {
+      if (error || !stdout) return resolve([]);
+      const files = stdout.split('\n')
+        .filter(Boolean)
+        .map(line => {
+          // porcelain: XY(2문자) + 공백(1문자) + 파일명 — 항상 고정 3문자
+          const file = line.slice(3);
+          const arrowIdx = file.indexOf(' -> ');
+          return arrowIdx >= 0 ? file.slice(arrowIdx + 4) : file;
+        })
+        .filter(Boolean);
+      resolve(files);
+    });
+  });
 }
 
 async function stash() {

@@ -6,4 +6,5 @@ claude-output-*.txt
 claude-refix-*.txt
 prompt-*.txt
 sessions.json
+retry-counts.json
 issue-images/

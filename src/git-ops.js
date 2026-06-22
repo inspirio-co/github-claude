@@ -25,9 +25,34 @@ async function checkout(branch) {
   await run(`git checkout ${branch}`);
 }
 
+/**
+ * 작업 시작 전 워크스페이스에 커밋되지 않은 변경이 있으면
+ * 타임스탬프 백업 브랜치에 커밋해 보존한 뒤 워크트리를 깨끗하게 만든다.
+ * 변경이 없으면 아무 것도 하지 않고 null 반환.
+ * @returns {Promise<string|null>} 생성된 백업 브랜치명 (없으면 null)
+ */
+async function backupUncommittedChanges() {
+  const status = await run('git status --porcelain');
+  if (!status) return null;
+
+  const current = await run('git rev-parse --abbrev-ref HEAD').catch(() => 'detached');
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupBranch = `auto-backup/${current}-${ts}`;
+
+  logger.warn(`Uncommitted changes detected on "${current}", backing up to ${backupBranch}`);
+  // checkout -b 는 미커밋 변경을 그대로 가지고 새 브랜치로 이동하므로 손실 없음
+  await run(`git checkout -b ${backupBranch}`);
+  await run('git add -A');
+  await run(`git commit -m "chore: auto-backup uncommitted changes from ${current} before agent task"`);
+  logger.info(`Uncommitted changes preserved on branch: ${backupBranch}`);
+  return backupBranch;
+}
+
 async function checkoutNew(branch, base) {
   logger.info(`Creating new branch: ${branch} from ${base || config.baseBranch}`);
   const baseBranch = base || config.baseBranch;
+  // 안전망: base 전환 전 미커밋 변경이 남아 있으면 백업 브랜치에 보존
+  await backupUncommittedChanges();
   await run(`git checkout ${baseBranch}`);
   await run(`git pull origin ${baseBranch}`);
 
@@ -152,6 +177,7 @@ module.exports = {
   run,
   checkout,
   checkoutNew,
+  backupUncommittedChanges,
   stageAll,
   commit,
   push,

@@ -228,9 +228,7 @@ async function reviewPR(prNumber, retryCount = 0) {
               await githubApi.commentOnIssue(owner, repo, prNumber,
                 '⚠️ 빌드 오류 재수정 후에도 변경사항이 없습니다. 수동 검토가 필요합니다.'
               );
-              if (issueNumber) {
-                await githubApi.updateIssueLabels(owner, repo, issueNumber, [config.labels.needsReview]);
-              }
+              // 머지되지 않은 실패 경로 — needs-review는 머지 성공 시에만 부착 (in-progress 유지)
             }
 
             try { await gitOps.checkout(config.baseBranch); } catch (_) {}
@@ -239,9 +237,7 @@ async function reviewPR(prNumber, retryCount = 0) {
             await githubApi.commentOnIssue(owner, repo, prNumber,
               `⚠️ 빌드 실패 — 최대 재시도 횟수(${config.claude.maxRetries})를 초과했습니다. 수동 검토가 필요합니다.`
             );
-            if (issueNumber) {
-              await githubApi.updateIssueLabels(owner, repo, issueNumber, [config.labels.needsReview]);
-            }
+            // 머지되지 않은 실패 경로 — needs-review는 머지 성공 시에만 부착 (in-progress 유지)
             return { verdict: 'BUILD_FAILED', maxRetriesReached: true };
           }
         }
@@ -359,9 +355,7 @@ async function reviewPR(prNumber, retryCount = 0) {
     if (verdict === 'REQUEST_CHANGES') {
       if (retryCount >= config.claude.maxRetries) {
         logger.warn(`PR #${prNumber} exceeded max retries (${config.claude.maxRetries})`);
-        if (issueNumber) {
-          await githubApi.updateIssueLabels(owner, repo, issueNumber, [config.labels.needsReview]);
-        }
+        // 머지되지 않은 실패 경로 — needs-review는 머지 성공 시에만 부착 (in-progress 유지)
         await githubApi.commentOnIssue(owner, repo, prNumber,
           `⚠️ ${config.claude.maxRetries}회 재시도 후에도 리뷰를 통과하지 못했습니다. 수동 검토가 필요합니다.`
         );
@@ -403,9 +397,7 @@ async function reviewPR(prNumber, retryCount = 0) {
         await githubApi.commentOnIssue(owner, repo, prNumber,
           `⚠️ 재수정 후에도 변경사항이 없습니다. 수동 검토가 필요합니다.`
         );
-        if (issueNumber) {
-          await githubApi.updateIssueLabels(owner, repo, issueNumber, [config.labels.needsReview]);
-        }
+        // 머지되지 않은 실패 경로 — needs-review는 머지 성공 시에만 부착 (in-progress 유지)
       }
 
       // synchronize 이벤트가 자동 발생 → webhook-handler에서 재리뷰 트리거

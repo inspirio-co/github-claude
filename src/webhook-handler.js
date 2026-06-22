@@ -61,11 +61,16 @@ async function processQueue() {
   logger.info(`Task started: ${label} (remaining: ${taskQueue.length})`);
 
   try {
-    // 작업 시작 전 base 브랜치로 전환만 수행 (로컬 변경사항은 보존)
+    // 작업 시작 전 워크스페이스 정리:
+    // 미커밋 변경이 있으면 타임스탬프 백업 브랜치에 보존한 뒤 base 브랜치로 전환
     try {
+      const backup = await gitOps.backupUncommittedChanges();
+      if (backup) {
+        logger.warn(`Pre-task uncommitted changes preserved on ${backup}`);
+      }
       await gitOps.run(`git checkout ${config.baseBranch}`);
     } catch (cleanErr) {
-      logger.warn(`Branch checkout before task: ${cleanErr.message}`);
+      logger.warn(`Branch prep before task: ${cleanErr.message}`);
     }
 
     const result = await fn();

@@ -14,6 +14,19 @@ const config = {
   // Workspace
   workspaceDir: process.env.WORKSPACE_DIR || process.cwd(),
 
+  // Backend (프론트 이슈의 근본원인이 백엔드일 때 fix 에이전트가 함께 수정·배포)
+  // 별도 이슈/웹훅이 아니라, 프론트 이슈 처리 중 백엔드 레포까지 인라인으로 고친다.
+  backend: {
+    enabled: process.env.BACKEND_FIX_ENABLED !== 'false',
+    repo: process.env.BACKEND_REPO || 'mrv-backend',
+    workspaceDir: process.env.BACKEND_WORKSPACE_DIR || '/home/ubuntu/mrv/mrv-backend',
+    baseBranch: process.env.BACKEND_BASE_BRANCH || 'main',
+    // 빌드 성공 시에만 배포(pm2 restart). 빌드 실패면 PR만 열어두고 배포하지 않음.
+    buildCommand: process.env.BACKEND_BUILD_COMMAND ||
+      'cd /home/ubuntu/mrv/mrv-backend && npm install && npx prisma generate && npm run build',
+    deployCommand: process.env.BACKEND_DEPLOY_COMMAND || 'pm2 restart mrv-backend',
+  },
+
   // Labels
   labels: {
     trigger: process.env.LABEL_TRIGGER || 'auto-fix',

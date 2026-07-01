@@ -7,6 +7,7 @@ const config = require('./config');
 const logger = require('./logger');
 const gitOps = require('./git-ops');
 const githubApi = require('./github-api');
+const backendFix = require('./backend-fix');
 
 const TEMP_DIR = path.join(__dirname, '..');
 const IMAGES_DIR = path.join(TEMP_DIR, 'issue-images');
@@ -181,7 +182,11 @@ async function _execClaude(prompt, tools, label, sessionId) {
 
   return new Promise((resolve, reject) => {
     const disallowed = config.claude.disallowedTools ? ` --disallowedTools "${config.claude.disallowedTools}"` : '';
-    const cmd = `cd "${config.workspaceDir}" && cat "${promptFile}" | claude -p --output-format json --allowedTools "${tools}"${disallowed}${resumeFlag} > "${outputFile}" 2>&1`;
+    // 프론트 이슈의 근본원인이 백엔드일 수 있으므로 백엔드 워크스페이스를 편집 가능 디렉터리로 추가.
+    // (cwd는 프론트로 유지 → 프론트 변경 감지/커밋 흐름은 그대로)
+    const addDir = (config.backend.enabled && config.backend.workspaceDir)
+      ? ` --add-dir "${config.backend.workspaceDir}"` : '';
+    const cmd = `cd "${config.workspaceDir}" && cat "${promptFile}" | claude -p --output-format json --allowedTools "${tools}"${disallowed}${addDir}${resumeFlag} > "${outputFile}" 2>&1`;
 
     exec(cmd, {
       maxBuffer: 10 * 1024 * 1024,
@@ -259,12 +264,19 @@ async function fixIssue(issueData) {
   // 이미지 다운로드
   const { imageSection } = await downloadIssueImages(number, allTexts);
 
+  const backendDir = config.backend.enabled ? config.backend.workspaceDir : null;
+  const backendRule = backendDir ? `
+- 이 이슈는 프론트엔드에 등록됐지만, 근본원인이 백엔드(API·OCR 프롬프트·배출량 계산 서비스·Prisma 등)에 있을 수 있습니다.
+  그런 경우 백엔드 레포(${backendDir})의 파일도 직접 수정하세요. 프론트에서만 우회하지 말고 진짜 원인을 백엔드에서 고치세요.
+- 단, 근본원인이 실제로 백엔드일 때만 백엔드를 수정하세요. 프론트만으로 해결되는 이슈는 백엔드를 건드리지 마세요(기본은 프론트).
+- 백엔드에서 절대 건드리지 말 것: prisma/migrations/, .env, node_modules/, package-lock.json.` : '';
+
   const safetyRules = `
 ⚠️ 안전 규칙 (반드시 준수):
-- 작업 경로: ${config.workspaceDir} 내부 파일만 읽기/수정 가능. 이 경로 외부의 파일은 절대 접근하지 마세요.
+- 작업 경로: ${config.workspaceDir}${backendDir ? ` 및 ${backendDir}` : ''} 내부 파일만 읽기/수정 가능. 이 외의 경로(github-claude, docs 등)는 절대 접근하지 마세요.
 - git reset, git clean, git checkout -- ., rm -rf 등 파괴적 명령은 절대 실행하지 마세요.
 - .env, 설정 파일, package.json, package-lock.json은 수정하지 마세요.
-- node_modules/ 디렉토리는 건드리지 마세요.
+- node_modules/ 디렉토리는 건드리지 마세요.${backendRule}
 - 이 워크스페이스에서 다른 개발자가 병렬로 작업 중일 수 있습니다. 다른 사람의 변경사항과 충돌하지 않도록 이슈에 해당하는 파일만 최소한으로 수정하세요.
 `;
 
@@ -433,15 +445,29 @@ async function processWithPR(issueData) {
     if (dirtyBefore.size > 0) {
       logger.warn(`Pre-existing dirty files before fix (issue #${number})`, { files: [...dirtyBefore] });
     }
+    // 백엔드 워크스페이스의 사전 dirty 스냅샷 (근본원인이 백엔드일 때 fix가 만든 변경만 식별)
+    const backendDirtyBefore = config.backend.enabled ? await backendFix.getBackendChangedFiles() : [];
 
-    // 4. Claude Code로 수정
+    // 4. Claude Code로 수정 (프론트 + 필요 시 백엔드)
     const claudeOutput = await fixIssue(issueData);
 
     // 5. Claude가 변경한 파일만 추출 (기존 dirty 파일 제외)
     const allDirty = await gitOps.getModifiedFiles();
     const claudeFiles = allDirty.filter(f => !dirtyBefore.has(f));
 
+    // 5-b. 백엔드 근본원인 처리: 백엔드 변경이 있으면 백엔드 레포에 PR·빌드·머지·배포까지 인라인 수행
+    let backendResult = null;
+    if (config.backend.enabled) {
+      backendResult = await backendFix.handleBackendChanges(issueData, backendDirtyBefore);
+    }
+
     if (claudeFiles.length === 0) {
+      // 프론트 변경이 없어도 백엔드에서 해결됐으면 성공 처리
+      if (backendResult && backendResult.prNumber) {
+        logger.info(`No frontend changes, but backend PR #${backendResult.prNumber} created for issue #${number}`);
+        await gitOps.checkout(config.baseBranch).catch(() => {});
+        return { success: true, backendOnly: true, backendPr: backendResult.prNumber };
+      }
       logger.warn(`No changes detected for issue #${number}`);
       await githubApi.commentOnIssue(owner, repo, number,
         '⚠️ Claude가 코드를 분석했으나 변경사항이 없습니다.\n\n' +

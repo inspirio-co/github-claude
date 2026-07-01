@@ -109,7 +109,7 @@ async function handleBackendChanges(issueData, preDirty = []) {
     if (!pr) {
       pr = await githubApi.createPullRequest(owner, repo, {
         title: `[#${number}] ${title} (backend)`,
-        body: `프론트 이슈 EQUAL-TABLE/mrv-frontend#${number} 의 근본원인이 백엔드에 있어 자동 생성된 PR입니다.\n\n**변경 파일:**\n${commitFiles.map(f => '- ' + f).join('\n')}`,
+        body: `프론트 이슈 ${config.owner}/${config.repo}#${number} 의 근본원인이 백엔드에 있어 자동 생성된 PR입니다.\n\n**변경 파일:**\n${commitFiles.map(f => '- ' + f).join('\n')}`,
         head: branch,
         base,
       });
@@ -133,25 +133,30 @@ async function handleBackendChanges(issueData, preDirty = []) {
       // 배포하지 않고 PR 열어둔 채 보고. 워크스페이스는 main으로 되돌림.
       await restoreMain();
       await githubApi.commentOnIssue(owner, repo, number,
-        `⚠️ 백엔드 근본원인을 수정해 PR EQUAL-TABLE/mrv-backend#${pr.number} 을 만들었으나 **빌드가 실패**하여 배포하지 않았습니다. 수동 검토가 필요합니다.\n\n\`\`\`\n${buildErr.substring(0, 800)}\n\`\`\``
+        `⚠️ 백엔드 근본원인을 수정해 PR ${owner}/${repo}#${pr.number} 을 만들었으나 **빌드가 실패**하여 배포하지 않았습니다. 수동 검토가 필요합니다.\n\n\`\`\`\n${buildErr.substring(0, 800)}\n\`\`\``
       ).catch(() => {});
       return { prNumber: pr.number, deployed: false, buildFailed: true, files: commitFiles };
     }
 
-    // 5. 머지 (squash) → 배포 (pm2 restart)
+    // 5. 머지 (squash) → 배포 (deployCommand, 미설정이면 배포 스킵)
     await githubApi.mergePullRequest(owner, repo, pr.number, { mergeMethod: 'squash' });
     logger.info(`Backend: PR #${pr.number} merged`);
 
+    const deployCmd = config.backend.deployCommand;
     let deployed = false;
     let deployErr = '';
-    try {
-      logger.info(`Backend: deploy started (${config.backend.deployCommand})`);
-      await sh(config.backend.deployCommand, { timeout: 120000 });
-      deployed = true;
-      logger.info(`Backend: deploy succeeded for PR #${pr.number}`);
-    } catch (e) {
-      deployErr = e.message;
-      logger.error(`Backend: deploy FAILED for PR #${pr.number}`, { error: e.message });
+    if (deployCmd) {
+      try {
+        logger.info(`Backend: deploy started (${deployCmd})`);
+        await sh(deployCmd, { timeout: 120000 });
+        deployed = true;
+        logger.info(`Backend: deploy succeeded for PR #${pr.number}`);
+      } catch (e) {
+        deployErr = e.message;
+        logger.error(`Backend: deploy FAILED for PR #${pr.number}`, { error: e.message });
+      }
+    } else {
+      logger.warn('Backend: no deployCommand configured, skipping deploy (build+merge only)');
     }
 
     // 6. 워크스페이스를 최신 main으로 동기화 + 임시 브랜치 정리
@@ -159,13 +164,18 @@ async function handleBackendChanges(issueData, preDirty = []) {
     try { await githubApi.deleteBranch(owner, repo, branch); } catch (_) {}
 
     // 7. 프론트 이슈에 결과 보고
-    if (deployed) {
+    const filesList = `\n\n**변경 파일:**\n${commitFiles.map(f => '- ' + f).join('\n')}`;
+    if (!deployCmd) {
       await githubApi.commentOnIssue(owner, repo, number,
-        `🛠️ 근본원인이 백엔드에 있어 백엔드까지 수정했습니다. PR EQUAL-TABLE/mrv-backend#${pr.number} 머지 + 빌드 + \`pm2 restart mrv-backend\` **라이브 배포 완료**.\n\n**변경 파일:**\n${commitFiles.map(f => '- ' + f).join('\n')}`
+        `🛠️ 근본원인이 백엔드에 있어 백엔드까지 수정했습니다. PR ${owner}/${repo}#${pr.number} 머지 + 빌드 성공. (배포 커맨드 미설정 → 자동 배포는 스킵, 서비스 반영은 수동 필요)${filesList}`
+      ).catch(() => {});
+    } else if (deployed) {
+      await githubApi.commentOnIssue(owner, repo, number,
+        `🛠️ 근본원인이 백엔드에 있어 백엔드까지 수정했습니다. PR ${owner}/${repo}#${pr.number} 머지 + 빌드 + 배포(\`${deployCmd}\`) **라이브 반영 완료**.${filesList}`
       ).catch(() => {});
     } else {
       await githubApi.commentOnIssue(owner, repo, number,
-        `🛠️ 백엔드 PR EQUAL-TABLE/mrv-backend#${pr.number} 머지 및 빌드는 성공했으나 **배포(pm2 restart) 단계에서 오류**가 발생했습니다. 수동 재시작이 필요합니다.\n\n\`\`\`\n${deployErr.substring(0, 500)}\n\`\`\``
+        `🛠️ 백엔드 PR ${owner}/${repo}#${pr.number} 머지 및 빌드는 성공했으나 **배포 단계에서 오류**가 발생했습니다. 수동 반영이 필요합니다.\n\n\`\`\`\n${deployErr.substring(0, 500)}\n\`\`\``
       ).catch(() => {});
     }
 

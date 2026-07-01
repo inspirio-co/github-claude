@@ -1,4 +1,15 @@
 require('dotenv').config();
+const path = require('path');
+const fs = require('fs');
+
+// 백엔드 설정은 머신·프로젝트별 값을 .env(BACKEND_*)로 주입한다. 소스엔 프로젝트명을 박지 않는다.
+const _beDir = process.env.BACKEND_WORKSPACE_DIR || '';
+// repo 이름 미지정 시 워크스페이스 경로의 basename에서 유도
+const _beRepo = process.env.BACKEND_REPO || (_beDir ? path.basename(_beDir) : '');
+// enabled: 명시적 env가 있으면 그 값을 따르고, 없으면 백엔드 워크스페이스가 git 레포로 존재할 때만 자동 활성화
+const _beEnabled = process.env.BACKEND_FIX_ENABLED != null
+  ? process.env.BACKEND_FIX_ENABLED !== 'false'
+  : (!!_beDir && (() => { try { return fs.existsSync(path.join(_beDir, '.git')); } catch (_) { return false; } })());
 
 const config = {
   // Server
@@ -16,15 +27,16 @@ const config = {
 
   // Backend (프론트 이슈의 근본원인이 백엔드일 때 fix 에이전트가 함께 수정·배포)
   // 별도 이슈/웹훅이 아니라, 프론트 이슈 처리 중 백엔드 레포까지 인라인으로 고친다.
+  // 머신별 실제 값(경로·빌드·배포 커맨드)은 .env의 BACKEND_* 로 주입한다.
   backend: {
-    enabled: process.env.BACKEND_FIX_ENABLED !== 'false',
-    repo: process.env.BACKEND_REPO || 'mrv-backend',
-    workspaceDir: process.env.BACKEND_WORKSPACE_DIR || '/home/ubuntu/mrv/mrv-backend',
-    baseBranch: process.env.BACKEND_BASE_BRANCH || 'main',
-    // 빌드 성공 시에만 배포(pm2 restart). 빌드 실패면 PR만 열어두고 배포하지 않음.
-    buildCommand: process.env.BACKEND_BUILD_COMMAND ||
-      'cd /home/ubuntu/mrv/mrv-backend && npm install && npx prisma generate && npm run build',
-    deployCommand: process.env.BACKEND_DEPLOY_COMMAND || 'pm2 restart mrv-backend',
+    enabled: _beEnabled,
+    repo: _beRepo,
+    workspaceDir: _beDir,
+    baseBranch: process.env.BACKEND_BASE_BRANCH || (process.env.GITHUB_BASE_BRANCH || 'main'),
+    // 기본 빌드: 해당 백엔드 워크스페이스에서 install+build (prisma 등 프로젝트별 커맨드는 .env로 오버라이드)
+    buildCommand: process.env.BACKEND_BUILD_COMMAND || `cd ${_beDir} && npm install && npm run build`,
+    // 배포 커맨드는 프로세스 매니저·서비스명이 머신별로 다르므로 기본은 비움(미설정 시 빌드·머지까지만 하고 배포 스킵).
+    deployCommand: process.env.BACKEND_DEPLOY_COMMAND || '',
   },
 
   // Labels

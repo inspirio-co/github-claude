@@ -54,6 +54,9 @@ const config = {
     disallowedTools: process.env.CLAUDE_DISALLOWED_TOOLS || 'Bash,Task',
     timeout: parseInt(process.env.CLAUDE_TIMEOUT || '600000', 10),
     maxRetries: parseInt(process.env.CLAUDE_MAX_RETRIES || '3', 10),
+    // 리뷰 프롬프트에 삽입하는 diff 최대 길이. 이보다 크면 잘리므로,
+    // 큰 PR도 통째로 담기게 넉넉히 잡는다(초과 시엔 파일 목록·절단 고지로 오탐 방지).
+    reviewMaxDiffChars: parseInt(process.env.CLAUDE_REVIEW_MAX_DIFF_CHARS || '200000', 10),
   },
   branchPrefix: process.env.BRANCH_PREFIX || 'auto-fix',
 

@@ -64,6 +64,7 @@ cp .env.example .env
 | `CLAUDE_REVIEW_TOOLS` | `Glob,Grep,Read` | Tools for review agent (read-only) |
 | `CLAUDE_TIMEOUT` | `600000` | Claude CLI timeout (ms) |
 | `CLAUDE_MAX_RETRIES` | `3` | Max re-fix attempts |
+| `CLAUDE_REVIEW_MAX_DIFF_CHARS` | `200000` | Max diff chars embedded in the review prompt. Larger diffs are truncated, but the full changed-file list + a truncation notice are always included so the reviewer never blocks solely because it couldn't see every line. |
 | `BRANCH_PREFIX` | `auto-fix` | Branch name prefix |
 | `ENABLE_PR` | `true` | Create PR for fixes |
 | `ENABLE_REVIEW` | `true` | Auto-review PRs |

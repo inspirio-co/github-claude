@@ -14,19 +14,34 @@ const TEMP_DIR = path.join(__dirname, '..');
 /**
  * Claude Code로 PR diff 리뷰
  */
-async function runReview(prNumber, diff, issueTitle, issueBody) {
-  logger.info(`=== Review agent started for PR #${prNumber} ===`);
+/**
+ * 리뷰 프롬프트 문자열 생성 (순수 함수 — 테스트 가능).
+ * diff가 한도를 넘으면 뒷부분을 자르되, 변경 파일 전체 목록과 "절단은 도구 한계일 뿐
+ * REQUEST_CHANGES 사유가 아님"을 명시해, 리뷰어가 '못 본 파일'을 근거로 오탐 거부하는 것을 막는다.
+ */
+function buildReviewPrompt(prNumber, diff, issueTitle, issueBody, fileList = '') {
+  const maxDiff = config.claude.reviewMaxDiffChars;
+  const truncated = diff.length > maxDiff;
+  const diffForPrompt = truncated ? diff.substring(0, maxDiff) : diff;
 
-  const prompt = `
+  const fileListBlock = fileList
+    ? `\n이 PR이 변경한 전체 파일 목록(스코프 확인용):\n${fileList}\n`
+    : '';
+
+  const truncationNotice = truncated
+    ? `\n⚠️ 주의: 아래 diff는 크기(${diff.length}자 > ${maxDiff}자 한도) 때문에 **뒷부분이 잘렸습니다.** 이는 리뷰 도구의 전송 한계일 뿐이며, 잘려서 보이지 않는 변경이 있다는 의미가 아닙니다. 위 "변경 파일 목록"이 실제 스코프의 정답입니다. **diff가 잘려 일부 파일·라인을 확인하지 못한다는 이유만으로 REQUEST_CHANGES 하지 마세요.** 보이는 범위에서 실제 결함이 있을 때만 거부하세요.\n`
+    : '';
+
+  return `
 PR #${prNumber} 코드 리뷰:
 
 관련 이슈: ${issueTitle || '(알 수 없음)'}
 이슈 내용: ${issueBody || '(알 수 없음)'}
-
+${fileListBlock}${truncationNotice}
 아래 PR의 diff를 리뷰해주세요:
 
 \`\`\`diff
-${diff.substring(0, 50000)}
+${diffForPrompt}
 \`\`\`
 
 리뷰 기준:
@@ -42,6 +57,12 @@ VERDICT: APPROVE 또는 REQUEST_CHANGES
 REASON: (한 줄 이유)
 DETAILS: (상세 리뷰 내용)
 `.trim();
+}
+
+async function runReview(prNumber, diff, issueTitle, issueBody, fileList = '') {
+  logger.info(`=== Review agent started for PR #${prNumber} ===`);
+
+  const prompt = buildReviewPrompt(prNumber, diff, issueTitle, issueBody, fileList);
 
   const promptFile = path.join(TEMP_DIR, `prompt-review-${prNumber}-${Date.now()}.txt`);
   const outputFile = path.join(TEMP_DIR, `claude-output-review-${prNumber}-${Date.now()}.txt`);
@@ -165,7 +186,18 @@ async function reviewPR(prNumber, retryCount = 0) {
       `🔍 Claude가 코드 리뷰를 시작합니다...${retryCount > 0 ? ` (${retryCount}차 재리뷰)` : ''}`
     );
 
-    const reviewOutput = await runReview(prNumber, diff, issueTitle, issueBody);
+    // 변경 파일 전체 목록(스코프 확인용) — diff가 잘려도 리뷰어가 실제 범위를 알 수 있게 함
+    let fileList = '';
+    try {
+      const files = await githubApi.getPullRequestFiles(owner, repo, prNumber);
+      if (Array.isArray(files)) {
+        fileList = files.map(f => `- ${f.filename} (+${f.additions}/-${f.deletions}, ${f.status})`).join('\n');
+      }
+    } catch (filesErr) {
+      logger.warn(`Could not fetch PR files for #${prNumber}: ${filesErr.message}`);
+    }
+
+    const reviewOutput = await runReview(prNumber, diff, issueTitle, issueBody, fileList);
     const verdict = parseVerdict(reviewOutput);
 
     logger.info(`Review verdict for PR #${prNumber}: ${verdict}`);
@@ -355,10 +387,17 @@ async function reviewPR(prNumber, retryCount = 0) {
     if (verdict === 'REQUEST_CHANGES') {
       if (retryCount >= config.claude.maxRetries) {
         logger.warn(`PR #${prNumber} exceeded max retries (${config.claude.maxRetries})`);
-        // 머지되지 않은 실패 경로 — needs-review는 머지 성공 시에만 부착 (in-progress 유지)
         await githubApi.commentOnIssue(owner, repo, prNumber,
           `⚠️ ${config.claude.maxRetries}회 재시도 후에도 리뷰를 통과하지 못했습니다. 수동 검토가 필요합니다.`
         );
+        // 조용히 in-progress로 방치하지 말고 needs-review로 에스컬레이션(사람이 볼 수 있게)
+        const escalateTarget = issueNumber || prNumber;
+        try {
+          await githubApi.updateIssueLabels(owner, repo, escalateTarget, [config.labels.needsReview]);
+          logger.info(`Issue #${escalateTarget} labeled needs-review (review not passed)`);
+        } catch (labelErr) {
+          logger.warn(`Failed to label needs-review on #${escalateTarget}: ${labelErr.message}`);
+        }
         return { verdict: 'REQUEST_CHANGES', maxRetriesReached: true };
       }
 
@@ -393,11 +432,16 @@ async function reviewPR(prNumber, retryCount = 0) {
           `🤖 Claude 재수정 완료 (${nextRetry}차).\n\n**수정 내용:**\n\`\`\`\n${refixOutput.substring(0, 500)}${refixOutput.length > 500 ? '...' : ''}\n\`\`\``
         );
       } else {
-        logger.warn(`No changes from re-fix for PR #${prNumber}`);
+        // 재수정 결과 변경이 없다 = fix 에이전트가 "고칠 결함이 없다(리뷰 지적이 오탐)"고 판단한 것.
+        // 여기서 그냥 return하면 push(=synchronize 이벤트)가 없어 재리뷰가 안 걸리고 PR이 영구 교착된다.
+        // → 원본 diff로 직접 재검증(재리뷰)하여 교착을 푼다. 재검증도 REQUEST_CHANGES면
+        //   retryCount 상한에서 needs-review로 에스컬레이션되므로 무한루프는 없다.
+        logger.warn(`No changes from re-fix for PR #${prNumber}, re-reviewing original diff (retry ${nextRetry})`);
         await githubApi.commentOnIssue(owner, repo, prNumber,
-          `⚠️ 재수정 후에도 변경사항이 없습니다. 수동 검토가 필요합니다.`
+          `⚠️ 재수정 결과 변경사항이 없습니다(리뷰 지적이 오탐일 가능성). 원본 diff로 재검증합니다. (${nextRetry}/${config.claude.maxRetries}차)`
         );
-        // 머지되지 않은 실패 경로 — needs-review는 머지 성공 시에만 부착 (in-progress 유지)
+        try { await gitOps.checkout(config.baseBranch); } catch (_) {}
+        return await reviewPR(prNumber, nextRetry);
       }
 
       // synchronize 이벤트가 자동 발생 → webhook-handler에서 재리뷰 트리거
@@ -413,4 +457,4 @@ async function reviewPR(prNumber, retryCount = 0) {
   }
 }
 
-module.exports = { reviewPR, parseVerdict };
+module.exports = { reviewPR, parseVerdict, buildReviewPrompt };

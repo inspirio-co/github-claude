@@ -464,9 +464,22 @@ async function processWithPR(issueData) {
     if (claudeFiles.length === 0) {
       // 프론트 변경이 없어도 백엔드에서 해결됐으면 성공 처리
       if (backendResult && backendResult.prNumber) {
-        logger.info(`No frontend changes, but backend PR #${backendResult.prNumber} created for issue #${number}`);
+        logger.info(`No frontend changes, but backend PR #${backendResult.prNumber} created for issue #${number} (deployed=${backendResult.deployed})`);
         await gitOps.checkout(config.baseBranch).catch(() => {});
-        return { success: true, backendOnly: true, backendPr: backendResult.prNumber };
+        // 백엔드 전용 수정은 프론트 PR이 없어 리뷰-머지 웹훅 경로를 안 탄다.
+        // 그대로 두면 이슈가 status/in-progress에 영구 방치되므로, 정상 프론트 머지 경로와
+        // 동일하게 이슈를 needs-review로 올려 사람이 확인 후 닫도록 마무리한다.
+        // (배포 완료/실패 상세 코멘트는 backend-fix.js가 이미 프론트 이슈에 남긴다.)
+        try {
+          const cur = await githubApi.getIssue(owner, repo, number);
+          if (cur.state === 'open') {
+            await githubApi.updateIssueLabels(owner, repo, number, [config.labels.needsReview]);
+            logger.info(`Issue #${number} labeled needs-review (backend-only fix, no frontend PR)`);
+          }
+        } catch (finErr) {
+          logger.error(`Failed to finalize issue #${number} after backend-only fix: ${finErr.message}`);
+        }
+        return { success: true, backendOnly: true, backendPr: backendResult.prNumber, deployed: !!backendResult.deployed };
       }
       logger.warn(`No changes detected for issue #${number}`);
       await githubApi.commentOnIssue(owner, repo, number,

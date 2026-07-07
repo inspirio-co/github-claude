@@ -132,7 +132,9 @@ async function handleBackendChanges(issueData, preDirty = []) {
     if (!buildOk) {
       // 배포하지 않고 PR 열어둔 채 보고. 워크스페이스는 main으로 되돌림.
       await restoreMain();
-      await githubApi.commentOnIssue(owner, repo, number,
+      // 보고 코멘트는 원본 '프론트' 이슈(config.repo)로 보낸다. repo(=백엔드 레포)로 보내면
+      // 존재하지 않는 backend#<프론트번호> 로 404가 나고 .catch로 삼켜져 아무 데도 안 남는다.
+      await githubApi.commentOnIssue(owner, config.repo, number,
         `⚠️ 백엔드 근본원인을 수정해 PR ${owner}/${repo}#${pr.number} 을 만들었으나 **빌드가 실패**하여 배포하지 않았습니다. 수동 검토가 필요합니다.\n\n\`\`\`\n${buildErr.substring(0, 800)}\n\`\`\``
       ).catch(() => {});
       return { prNumber: pr.number, deployed: false, buildFailed: true, files: commitFiles };
@@ -163,18 +165,18 @@ async function handleBackendChanges(issueData, preDirty = []) {
     await restoreMain(branch);
     try { await githubApi.deleteBranch(owner, repo, branch); } catch (_) {}
 
-    // 7. 프론트 이슈에 결과 보고
+    // 7. 프론트 이슈에 결과 보고 (config.repo = 프론트 레포. repo는 백엔드 레포이므로 사용 금지)
     const filesList = `\n\n**변경 파일:**\n${commitFiles.map(f => '- ' + f).join('\n')}`;
     if (!deployCmd) {
-      await githubApi.commentOnIssue(owner, repo, number,
+      await githubApi.commentOnIssue(owner, config.repo, number,
         `🛠️ 근본원인이 백엔드에 있어 백엔드까지 수정했습니다. PR ${owner}/${repo}#${pr.number} 머지 + 빌드 성공. (배포 커맨드 미설정 → 자동 배포는 스킵, 서비스 반영은 수동 필요)${filesList}`
       ).catch(() => {});
     } else if (deployed) {
-      await githubApi.commentOnIssue(owner, repo, number,
-        `🛠️ 근본원인이 백엔드에 있어 백엔드까지 수정했습니다. PR ${owner}/${repo}#${pr.number} 머지 + 빌드 + 배포(\`${deployCmd}\`) **라이브 반영 완료**.${filesList}`
+      await githubApi.commentOnIssue(owner, config.repo, number,
+        `🛠️ 근본원인이 백엔드에 있어 백엔드까지 수정했습니다. PR ${owner}/${repo}#${pr.number} 머지 + 빌드 + 배포(\`${deployCmd}\`) **라이브 반영 완료**. 확인 후 이슈를 닫아주세요.${filesList}`
       ).catch(() => {});
     } else {
-      await githubApi.commentOnIssue(owner, repo, number,
+      await githubApi.commentOnIssue(owner, config.repo, number,
         `🛠️ 백엔드 PR ${owner}/${repo}#${pr.number} 머지 및 빌드는 성공했으나 **배포 단계에서 오류**가 발생했습니다. 수동 반영이 필요합니다.\n\n\`\`\`\n${deployErr.substring(0, 500)}\n\`\`\``
       ).catch(() => {});
     }
@@ -184,7 +186,7 @@ async function handleBackendChanges(issueData, preDirty = []) {
   } catch (error) {
     logger.error(`Backend fix failed for issue #${number}`, { error: error.message, stack: error.stack });
     await restoreMain(branch).catch(() => {});
-    await githubApi.commentOnIssue(owner, repo, number,
+    await githubApi.commentOnIssue(owner, config.repo, number,
       `❌ 백엔드 자동 수정 중 오류 발생:\n\n\`\`\`\n${error.message.substring(0, 800)}\n\`\`\``
     ).catch(() => {});
     return { prNumber: null, deployed: false, error: error.message, files: commitFiles };

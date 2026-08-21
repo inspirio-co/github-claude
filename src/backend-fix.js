@@ -44,14 +44,90 @@ async function getBackendChangedFiles() {
 }
 
 /**
+ * 파일 내용 해시. 사라진 파일은 빈 문자열.
+ */
+async function hashBackendFile(file) {
+  return sh(`git hash-object -- "${file.replace(/"/g, '\\"')}"`, { timeout: 30000 }).catch(() => '');
+}
+
+/**
+ * fix 실행 "전" 백엔드 워크스페이스의 dirty 스냅샷을 파일→내용해시 맵으로 뜬다.
+ *
+ * 경로 목록만으로 스냅샷을 뜨면, 이미 dirty였던 파일을 봇이 추가로 고쳤을 때 그 변경이
+ * "봇이 안 건드린 파일"로 분류돼 커밋·빌드·배포가 통째로 스킵된다(#699 실제 사고:
+ * projects.service.ts 가 다른 작업 때문에 미커밋 상태였고, 봇이 같은 파일의 stepStatus를
+ * 고쳤으나 `Backend: no changes` 로 판정돼 pm2 재시작까지 전부 누락 → 소스만 고쳐진 채
+ * 라이브는 옛 코드가 그대로 돌았다). 해시로 비교하면 같은 파일이어도 내용이 바뀌면 잡힌다.
+ */
+async function getBackendDirtySnapshot() {
+  const files = await getBackendChangedFiles();
+  const snapshot = {};
+  for (const f of files) snapshot[f] = await hashBackendFile(f);
+  return snapshot;
+}
+
+/**
+ * 마이그레이션 누락 검사: prisma/migrations 를 전부 적용한 결과와 schema.prisma 를 비교한다.
+ * 차이가 있으면 = 스키마만 고치고 마이그레이션을 안 만든 것 → 배포하면 코드가 없는 컬럼을
+ * SELECT 해서 해당 모델의 모든 요청이 Prisma P2022 → 500 이 된다.
+ *
+ * @returns {Promise<{ok:boolean, sql?:string, error?:string}>}
+ */
+function checkMigrationDrift() {
+  const cmd = 'npx prisma migrate diff --from-migrations prisma/migrations --to-schema prisma/schema.prisma --script --exit-code';
+  return new Promise((resolve) => {
+    exec(cmd, { cwd: config.backend.workspaceDir, maxBuffer: 10 * 1024 * 1024, timeout: 120000 }, (error, stdout, stderr) => {
+      const out = (stdout || '').trim();
+      if (!error) return resolve({ ok: true });          // exit 0 = 차이 없음
+      if (error.code === 2) return resolve({ ok: false, sql: out });  // exit 2 = 누락된 변경분
+      // exit 1 = 검사 자체 실패(스키마 파싱 오류, shadow DB 미설정 등) — 배포를 막고 사람이 본다
+      resolve({ ok: false, error: (stderr || error.message || '').trim() || out });
+    });
+  });
+}
+
+/**
+ * 파일 → porcelain 상태코드(XY) 맵. 신규 추가(??/A)와 수정·삭제(M/D/R)를 구분하는 데 쓴다.
+ */
+async function getBackendFileStatuses() {
+  const dir = config.backend.workspaceDir;
+  return new Promise((resolve) => {
+    exec('git status --porcelain', { cwd: dir, maxBuffer: 10 * 1024 * 1024, timeout: 30000 }, (err, stdout) => {
+      if (err || !stdout) return resolve({});
+      const map = {};
+      for (const line of stdout.split('\n').filter(Boolean)) {
+        const status = line.slice(0, 2);
+        const file = line.slice(3);
+        const arrowIdx = file.indexOf(' -> ');
+        map[arrowIdx >= 0 ? file.slice(arrowIdx + 4) : file] = status;
+      }
+      resolve(map);
+    });
+  });
+}
+
+/**
+ * 마이그레이션 경로는 "신규 추가"만 허용한다.
+ * 봇이 만든 새 마이그레이션은 반드시 커밋돼야 하지만([[prisma-migration-drift]]),
+ * 이미 적용된 과거 마이그레이션의 수정·삭제는 DB와 히스토리를 깨뜨리므로 막는다.
+ */
+function isNewlyAddedMigration(file, status) {
+  if (!file.includes('prisma/migrations/')) return false;
+  if (file.endsWith('migration_lock.toml')) return false;
+  return status === '??' || status.startsWith('A');
+}
+
+/**
  * 프론트 이슈 처리 중 fix 에이전트가 백엔드 파일을 수정했는지 확인하고,
  * 수정이 있으면 백엔드 레포에 브랜치·커밋·PR 생성 → 빌드 → (성공 시) 머지+배포까지 수행한다.
  *
  * @param {{number:number,title:string}} issueData - 원본(프론트) 이슈
- * @param {string[]} preDirty - fix 실행 전 이미 dirty였던 백엔드 파일(있다면 제외)
- * @returns {Promise<null | {prNumber:number, deployed:boolean, buildFailed?:boolean, files:string[]}>}
+ * @param {Object<string,string>|string[]} preDirty - fix 실행 전 dirty였던 백엔드 파일.
+ *   getBackendDirtySnapshot()이 준 {파일:해시} 맵을 넘긴다. 내용이 그대로인 파일만 제외하고,
+ *   해시가 바뀐 파일은 봇이 고친 것으로 보고 포함한다. (구버전 호환: 배열이면 경로 기준 제외)
+ * @returns {Promise<null | {prNumber:number, deployed:boolean, buildFailed?:boolean, driftBlocked?:boolean, files:string[]}>}
  */
-async function handleBackendChanges(issueData, preDirty = []) {
+async function handleBackendChanges(issueData, preDirty = {}) {
   if (!config.backend.enabled) return null;
 
   const { number, title } = issueData;
@@ -61,9 +137,27 @@ async function handleBackendChanges(issueData, preDirty = []) {
   const base = config.backend.baseBranch;
   const branch = `${config.branchPrefix}/issue-${number}`;
 
-  const preSet = new Set(preDirty);
+  // 구버전 호출(배열)은 해시 정보가 없으므로 종전대로 경로 기준 제외
+  const legacyPathOnly = Array.isArray(preDirty);
+  const preSnapshot = legacyPathOnly
+    ? Object.fromEntries(preDirty.map(f => [f, null]))
+    : (preDirty || {});
+
   const allChanged = await getBackendChangedFiles();
-  const files = allChanged.filter(f => !preSet.has(f));
+  const files = [];
+  const touchedPreDirty = [];
+  for (const f of allChanged) {
+    if (!(f in preSnapshot)) { files.push(f); continue; }
+    if (legacyPathOnly) continue;
+    // 사전 dirty였어도 내용이 바뀌었으면 봇이 고친 것 → 커밋·빌드·배포 대상 (#699)
+    if ((await hashBackendFile(f)) !== preSnapshot[f]) {
+      files.push(f);
+      touchedPreDirty.push(f);
+    }
+  }
+  if (touchedPreDirty.length > 0) {
+    logger.warn(`Backend: pre-existing dirty file(s) further modified by fix — including them`, { files: touchedPreDirty });
+  }
 
   if (files.length === 0) {
     logger.info(`Backend: no changes for issue #${number}`);
@@ -72,11 +166,13 @@ async function handleBackendChanges(issueData, preDirty = []) {
 
   logger.info(`Backend: ${files.length} changed file(s) for issue #${number}`, { files });
 
-  // 워크스페이스 안전장치: .env / prisma migration / node_modules 는 커밋 대상에서 제외
+  // 워크스페이스 안전장치: .env / node_modules 는 커밋 대상에서 제외.
+  // prisma/migrations 는 "신규 추가"만 허용 — 커밋에서 빼면 스키마만 배포돼 P2022 500이 난다.
+  const statuses = await getBackendFileStatuses();
   const forbidden = files.filter(f =>
     f.includes('node_modules/') ||
     f === '.env' || f.endsWith('/.env') ||
-    f.includes('prisma/migrations/')
+    (f.includes('prisma/migrations/') && !isNewlyAddedMigration(f, statuses[f] || ''))
   );
   const commitFiles = files.filter(f => !forbidden.includes(f));
   if (forbidden.length > 0) {
@@ -139,6 +235,21 @@ async function handleBackendChanges(issueData, preDirty = []) {
       ).catch(() => {});
       return { prNumber: pr.number, deployed: false, buildFailed: true, files: commitFiles };
     }
+
+    // 4-b. 마이그레이션 누락 검사 (빌드는 통과해도 DB 스키마가 안 따라오면 전 API가 500)
+    const drift = await checkMigrationDrift();
+    if (!drift.ok) {
+      const detail = drift.sql
+        ? `마이그레이션에 반영되지 않은 스키마 변경:\n\`\`\`sql\n${drift.sql.substring(0, 800)}\n\`\`\``
+        : `드리프트 검사 실패:\n\`\`\`\n${(drift.error || '').substring(0, 800)}\n\`\`\``;
+      logger.error(`Backend: migration drift detected for PR #${pr.number}, deploy blocked`, { sql: drift.sql, error: drift.error });
+      await restoreMain();
+      await githubApi.commentOnIssue(owner, config.repo, number,
+        `⚠️ 백엔드 PR ${owner}/${repo}#${pr.number} 은 빌드에 성공했으나 **\`prisma/migrations\` 에 누락된 스키마 변경**이 있어 머지·배포를 중단했습니다. 이대로 배포하면 해당 모델의 모든 요청이 Prisma P2022 → 500 이 됩니다.\n\n${detail}\n\n마이그레이션을 생성(\`prisma migrate dev\`)해 PR에 추가한 뒤 다시 진행해 주세요.`
+      ).catch(() => {});
+      return { prNumber: pr.number, deployed: false, driftBlocked: true, files: commitFiles };
+    }
+    logger.info(`Backend: migration drift check passed for PR #${pr.number}`);
 
     // 5. 머지 (squash) → 배포 (deployCommand, 미설정이면 배포 스킵)
     await githubApi.mergePullRequest(owner, repo, pr.number, { mergeMethod: 'squash' });
@@ -208,4 +319,4 @@ async function restoreMain(branch = null) {
   }
 }
 
-module.exports = { handleBackendChanges, getBackendChangedFiles };
+module.exports = { handleBackendChanges, getBackendChangedFiles, getBackendDirtySnapshot, getBackendFileStatuses, isNewlyAddedMigration, checkMigrationDrift };

@@ -216,8 +216,17 @@ async function _execClaude(prompt, tools, label, sessionId) {
       }
 
       if (error) {
-        logger.error(`Claude Code failed (${label})`, { error: error.message, outputSnippet: result.substring(0, 300) });
-        reject(new Error(`Claude Code error: ${error.message}\nOutput: ${result.substring(0, 500)}`));
+        // exec 타임아웃은 SIGTERM으로 죽이며, claude -p는 종료 시점에 한 번에 출력하므로
+        // 출력 파일이 비어 원인 추적이 불가능했다 → 타임아웃임을 명시한다 (#685)
+        const timedOut = error.killed || error.signal === 'SIGTERM';
+        const reason = timedOut
+          ? `Claude Code 타임아웃 (${Math.round(config.claude.timeout / 60000)}분 초과로 강제 종료됨, 출력 없음)`
+          : `Claude Code error: ${error.message}`;
+        logger.error(`Claude Code failed (${label})`, {
+          error: error.message, timedOut, timeoutMs: config.claude.timeout,
+          outputSnippet: result.substring(0, 300),
+        });
+        reject(new Error(`${reason}\nOutput: ${result.substring(0, 500)}`));
       } else {
         logger.info(`Claude Code completed (${label})`, { outputLength: result.length, sessionId: newSessionId });
         resolve({ output: result, sessionId: newSessionId });
@@ -445,8 +454,14 @@ async function processWithPR(issueData) {
     if (dirtyBefore.size > 0) {
       logger.warn(`Pre-existing dirty files before fix (issue #${number})`, { files: [...dirtyBefore] });
     }
-    // 백엔드 워크스페이스의 사전 dirty 스냅샷 (근본원인이 백엔드일 때 fix가 만든 변경만 식별)
-    const backendDirtyBefore = config.backend.enabled ? await backendFix.getBackendChangedFiles() : [];
+    // 백엔드 워크스페이스의 사전 dirty 스냅샷 (근본원인이 백엔드일 때 fix가 만든 변경만 식별).
+    // 경로가 아니라 내용 해시로 떠야 한다 — 이미 dirty인 파일을 봇이 더 고쳤을 때
+    // 그 변경이 통째로 스킵돼 빌드·배포가 누락된다(#699).
+    const backendDirtyBefore = config.backend.enabled ? await backendFix.getBackendDirtySnapshot() : {};
+    const backendDirtyFiles = Object.keys(backendDirtyBefore);
+    if (backendDirtyFiles.length > 0) {
+      logger.warn(`Pre-existing dirty backend files before fix (issue #${number})`, { files: backendDirtyFiles });
+    }
 
     // 4. Claude Code로 수정 (프론트 + 필요 시 백엔드)
     const claudeOutput = await fixIssue(issueData);

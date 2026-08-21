@@ -89,8 +89,14 @@ async function runReview(prNumber, diff, issueTitle, issueBody, fileList = '') {
       await fs.unlink(outputFile).catch(() => {});
 
       if (error) {
-        logger.error(`Review agent failed for PR #${prNumber}`, { error: error.message });
-        reject(new Error(`Review error: ${error.message}`));
+        const timedOut = error.killed || error.signal === 'SIGTERM';
+        const reason = timedOut
+          ? `리뷰 타임아웃 (${Math.round(config.claude.timeout / 60000)}분 초과로 강제 종료됨, 출력 없음)`
+          : `Review error: ${error.message}`;
+        logger.error(`Review agent failed for PR #${prNumber}`, {
+          error: error.message, timedOut, timeoutMs: config.claude.timeout,
+        });
+        reject(new Error(reason));
       } else {
         logger.info(`Review agent completed for PR #${prNumber}`, { outputLength: output.length });
         resolve(output);
@@ -132,6 +138,15 @@ async function reviewPR(prNumber, retryCount = 0) {
   try {
     // 1. PR 정보 & diff 가져오기
     const pr = await githubApi.getPullRequest(owner, repo, prNumber);
+
+    // 멱등성 가드: 이미 머지·닫힌 PR이면 리뷰/머지/배포를 재실행하지 않는다.
+    // (같은 PR에 opened + synchronize 등 여러 이벤트가 각각 review 태스크를 큐잉해,
+    //  첫 태스크가 이미 머지·배포를 끝낸 뒤에도 낡은 태스크가 재머지·재배포하던 중복 배포 버그 차단)
+    if (pr.merged || pr.state !== 'open') {
+      logger.info(`PR #${prNumber} is already ${pr.merged ? 'merged' : pr.state}, skipping duplicate review/deploy`);
+      return { verdict: 'SKIP', reason: pr.merged ? 'pr-already-merged' : `pr-${pr.state}` };
+    }
+
     let diff = '';
     try {
       diff = await githubApi.getPullRequestDiff(owner, repo, prNumber);

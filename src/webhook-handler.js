@@ -46,6 +46,15 @@ let isProcessing = false;
 
 function enqueueTask(taskFn, label) {
   return new Promise((resolve, reject) => {
+    // 큐에 대기 중인 동일 라벨 태스크가 있으면 중복 큐잉하지 않는다.
+    // (같은 PR에 opened+synchronize 등 여러 이벤트가 연달아 들어와 review-pr-N이
+    //  2개 큐잉되면, 첫 태스크가 머지·배포를 끝낸 뒤 두 번째가 재배포하던 중복 배포 버그 예방)
+    // 주의: '실행 중'인 태스크는 대상에서 제외한다 — re-fix가 push한 synchronize의
+    //   정당한 재리뷰까지 삼키지 않도록. 머지 완료 PR의 최종 방어는 reviewPR의 멱등 가드가 담당.
+    if (taskQueue.some(t => t.label === label)) {
+      logger.info(`Task "${label}" already queued, skipping duplicate enqueue`);
+      return resolve({ skipped: true, reason: 'duplicate-queued' });
+    }
     taskQueue.push({ fn: taskFn, label, resolve, reject });
     logger.info(`Task queued: ${label} (queue size: ${taskQueue.length})`);
     processQueue();

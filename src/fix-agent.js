@@ -498,9 +498,28 @@ async function processWithPR(issueData) {
       }
       logger.warn(`No changes detected for issue #${number}`);
       await githubApi.commentOnIssue(owner, repo, number,
-        '⚠️ Claude가 코드를 분석했으나 변경사항이 없습니다.\n\n' +
+        '⚠️ Claude가 코드를 분석했으나 변경사항이 없습니다. **사람 판단이 필요합니다.**\n\n' +
+        '코드로 고칠 것이 없다고 판단한 경우입니다. 다음 중 하나일 수 있습니다.\n' +
+        '- 이미 고쳐져 있음 (다른 PR·다른 저장소에서 해결)\n' +
+        '- 문서·데이터에 값이 없어 코드로는 해결 불가\n' +
+        '- 이슈 내용만으로는 재현·판단이 어려움 (정보 보강 필요)\n\n' +
+        '아래 분석을 확인하고 이슈를 닫거나, 내용을 보강해 다시 라벨을 붙여 주세요.\n\n' +
         `**분석 결과:**\n\`\`\`\n${claudeOutput.substring(0, 1000)}\n\`\`\``
       );
+      // 변경이 없으면 PR 이 없고, PR 이 없으면 리뷰-머지 웹훅 경로를 타지 않는다.
+      // 라벨을 그대로 두면 이슈가 status/in-progress 에 영구 방치돼 아무도 다음
+      // 행동을 하지 않는다(실측 #947: 봇이 7차까지 돌며 원인을 정확히 진단하고도
+      // 이슈가 멈춰 있었다). 바로 위 "백엔드 전용 수정" 분기와 같은 이유·같은 처리로
+      // needs-review 로 올려 사람에게 넘긴다.
+      try {
+        const cur = await githubApi.getIssue(owner, repo, number);
+        if (cur.state === 'open') {
+          await githubApi.updateIssueLabels(owner, repo, number, [config.labels.needsReview]);
+          logger.info(`Issue #${number} labeled needs-review (no changes — needs human judgement)`);
+        }
+      } catch (finErr) {
+        logger.error(`Failed to label issue #${number} after no-change analysis: ${finErr.message}`);
+      }
       await gitOps.checkout(config.baseBranch);
       return { success: false, reason: 'no-changes' };
     }

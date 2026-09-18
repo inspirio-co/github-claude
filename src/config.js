@@ -73,6 +73,21 @@ const config = {
   buildCommand: process.env.BUILD_COMMAND || '',
   deployCommand: process.env.DEPLOY_COMMAND || '',
 
+  // 수정내역 자동기록 (루터 DATABASE — QA가 읽는 자연어 표)
+  // 머지·배포가 끝난 수정 1건마다 행 하나를 추가한다. 실패해도 파이프라인은 계속 간다.
+  changelog: {
+    enabled: process.env.ROOTR_CHANGELOG_ENABLED !== 'false',
+    baseUrl: process.env.ROOTR_BASE_URL || 'https://rootr.io/api/v1',
+    dbId: process.env.ROOTR_CHANGELOG_DB_ID || '',
+    // 키는 .env 대신 별도 파일(기본 .rootr-key, chmod 600)에 두고 읽는다
+    apiKey: (process.env.ROOTR_API_KEY || (() => {
+      try {
+        return fs.readFileSync(process.env.ROOTR_KEY_FILE || path.join(__dirname, '..', '.rootr-key'), 'utf-8').trim();
+      } catch (_) { return ''; }
+    })()),
+    timeout: parseInt(process.env.ROOTR_CHANGELOG_TIMEOUT || '300000', 10),
+  },
+
   // QA (QuestCode)
   qa: {
     apiToken: process.env.QUESTCODE_API_TOKEN || '',

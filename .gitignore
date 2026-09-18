@@ -8,3 +8,5 @@ prompt-*.txt
 sessions.json
 retry-counts.json
 issue-images/
+.rootr-key
+.env.bak-*

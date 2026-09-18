@@ -8,6 +8,7 @@ const logger = require('./logger');
 const gitOps = require('./git-ops');
 const githubApi = require('./github-api');
 const backendFix = require('./backend-fix');
+const changelog = require('./changelog-rootr');
 
 const TEMP_DIR = path.join(__dirname, '..');
 const IMAGES_DIR = path.join(TEMP_DIR, 'issue-images');
@@ -491,6 +492,16 @@ async function processWithPR(issueData) {
             await githubApi.updateIssueLabels(owner, repo, number, [config.labels.needsReview]);
             logger.info(`Issue #${number} labeled needs-review (backend-only fix, no frontend PR)`);
           }
+          // 백엔드 전용 수정도 QA는 화면에서 확인한다 — 같은 표에 기록한다
+          await changelog.record({
+            issueNumber: number,
+            issueTitle: title,
+            issueBody: issueData.body,
+            prNumber: backendResult.prNumber,
+            repo: config.backend.repo,
+            deployed: !!backendResult.deployed,
+            note: '백엔드에서만 수정된 건입니다. 화면 코드는 그대로이고 서버가 돌려주는 값이 바뀝니다.',
+          });
         } catch (finErr) {
           logger.error(`Failed to finalize issue #${number} after backend-only fix: ${finErr.message}`);
         }

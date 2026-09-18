@@ -8,6 +8,7 @@ const gitOps = require('./git-ops');
 const fixAgent = require('./fix-agent');
 const buildDeploy = require('./build-deploy');
 const qaAgent = require('./qa-agent');
+const changelog = require('./changelog-rootr');
 
 const TEMP_DIR = path.join(__dirname, '..');
 
@@ -387,6 +388,18 @@ async function reviewPR(prNumber, retryCount = 0) {
         } catch (labelErr) {
           logger.error(`Failed to update issue #${issueNumber}: ${labelErr.message}`);
         }
+      }
+
+      // 수정내역을 루터 표에 자연어로 기록 (QA용). 실패해도 파이프라인은 계속 간다.
+      if (issueNumber) {
+        await changelog.record({
+          issueNumber,
+          issueTitle,
+          issueBody,
+          prNumber,
+          repo,
+          deployed: config.features.build && !!config.buildCommand,
+        });
       }
 
       // remote 브랜치 삭제

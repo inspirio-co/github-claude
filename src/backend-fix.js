@@ -1,4 +1,6 @@
 const { exec } = require('child_process');
+const fs = require('fs/promises');
+const path = require('path');
 const config = require('./config');
 const logger = require('./logger');
 const githubApi = require('./github-api');
@@ -84,6 +86,76 @@ function checkMigrationDrift() {
       resolve({ ok: false, error: (stderr || error.message || '').trim() || out });
     });
   });
+}
+
+/**
+ * 드리프트 SQL이 "자동 생성해도 안전한" 가산적 변경만으로 이뤄졌는지 판정한다.
+ *
+ * 안전 = 기존 컬럼·데이터를 잃지 않고, 기존 행 때문에 마이그레이션 자체가 실패할 일도 없는 것.
+ * 컬럼 삭제·타입 변경·NOT NULL 승격·UNIQUE 인덱스는 데이터 사정에 따라 결과가 갈리므로
+ * 사람이 판단해야 한다 → 종전대로 배포를 막는다.
+ *
+ * @returns {{safe:boolean, unsafe:string[]}}
+ */
+function classifyMigrationSql(sql) {
+  const statements = (sql || '')
+    .split('\n')
+    .map(l => l.replace(/--.*$/, '').trim())   // 주석 제거
+    .filter(Boolean)
+    .join(' ')
+    .split(';')
+    .map(st => st.trim())
+    .filter(Boolean);
+
+  if (statements.length === 0) return { safe: false, unsafe: [] };
+
+  const unsafe = [];
+  for (const st of statements) {
+    const s = st.replace(/\s+/g, ' ').toUpperCase();
+    const additive =
+      /^CREATE TABLE /.test(s) ||
+      /^CREATE INDEX /.test(s) ||                 // UNIQUE 인덱스는 매칭되지 않음 → 차단
+      /^CREATE TYPE /.test(s) ||
+      /^ALTER TYPE .+ ADD VALUE/.test(s) ||
+      /^ALTER TABLE .+ ADD CONSTRAINT .+ FOREIGN KEY/.test(s) ||
+      // 컬럼 추가는 nullable이거나 DEFAULT가 있어야 기존 행이 살아남는다
+      (/^ALTER TABLE .+ ADD COLUMN /.test(s) && (!/ NOT NULL/.test(s) || / DEFAULT /.test(s)));
+    if (!additive) unsafe.push(st);
+  }
+  return { safe: unsafe.length === 0, unsafe };
+}
+
+/**
+ * prisma 마이그레이션 디렉터리명에 쓰는 UTC 타임스탬프(YYYYMMDDHHmmss).
+ * 기존 마이그레이션보다 항상 뒤에 정렬돼야 migrate deploy가 순서대로 적용한다.
+ */
+function migrationTimestamp() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}` +
+         `${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}`;
+}
+
+/**
+ * migrate diff가 뽑아준 SQL을 그대로 새 마이그레이션 파일로 떨군다.
+ *
+ * fix 에이전트의 허용 툴은 Edit/Write/Glob/Grep/Read뿐이라 `prisma migrate dev`를 직접 돌릴 수
+ * 없다. 즉 schema.prisma를 고치는 백엔드 수정은 구조적으로 항상 마이그레이션이 빈 채로 끝난다
+ * (#787 실제 사고: 백엔드 PR이 드리프트로 영구 차단 → 프론트만 머지 → 리뷰가 계속
+ * REQUEST_CHANGES → 이슈가 needs-review로 방치). 여기서 파일을 만들어 그 구멍을 메운다.
+ *
+ * @returns {Promise<{name:string, relPath:string}>}
+ */
+async function writeAutoMigration(sql, issueNumber) {
+  const name = `${migrationTimestamp()}_auto_issue_${issueNumber}`;
+  const relDir = path.join('prisma', 'migrations', name);
+  const absDir = path.join(config.backend.workspaceDir, relDir);
+  await fs.mkdir(absDir, { recursive: true });
+  const header =
+    `-- 자동 생성: 프론트 이슈 #${issueNumber} 처리 중 발생한 schema.prisma 변경분\n` +
+    `-- (prisma migrate diff --from-migrations --to-schema 결과, 가산적 변경만 자동화)\n`;
+  await fs.writeFile(path.join(absDir, 'migration.sql'), header + sql.trim() + '\n', 'utf8');
+  return { name, relPath: path.join(relDir, 'migration.sql') };
 }
 
 /**
@@ -237,19 +309,48 @@ async function handleBackendChanges(issueData, preDirty = {}) {
     }
 
     // 4-b. 마이그레이션 누락 검사 (빌드는 통과해도 DB 스키마가 안 따라오면 전 API가 500)
-    const drift = await checkMigrationDrift();
+    //      누락분이 가산적 변경뿐이면 마이그레이션을 자동 생성해 PR에 얹고 파이프라인을 이어간다.
+    let drift = await checkMigrationDrift();
+    let autoMigration = null;
+    let unsafeSql = [];
+    if (!drift.ok && drift.sql) {
+      const verdict = classifyMigrationSql(drift.sql);
+      if (verdict.safe) {
+        autoMigration = await writeAutoMigration(drift.sql, number);
+        await sh(`git add -- "${autoMigration.relPath.replace(/"/g, '\\"')}"`);
+        await sh(`git commit -m "[#${number}] ${autoMigration.name} 마이그레이션 자동 생성"`);
+        await sh(`git push origin ${branch} --force`);
+        commitFiles.push(autoMigration.relPath);
+        logger.info(`Backend: auto-generated migration for PR #${pr.number}`, { name: autoMigration.name, sql: drift.sql });
+        // 재검사에서 통과해야만 배포로 넘어간다 (생성한 SQL이 스키마를 온전히 못 따라잡는 경우 방지)
+        drift = await checkMigrationDrift();
+        if (!drift.ok) {
+          logger.error(`Backend: drift persists after auto-migration for PR #${pr.number}`, { sql: drift.sql, error: drift.error });
+        }
+      } else {
+        unsafeSql = verdict.unsafe;
+        logger.warn(`Backend: drift SQL is not additive, auto-migration skipped for PR #${pr.number}`, { unsafe: verdict.unsafe });
+      }
+    }
     if (!drift.ok) {
       const detail = drift.sql
         ? `마이그레이션에 반영되지 않은 스키마 변경:\n\`\`\`sql\n${drift.sql.substring(0, 800)}\n\`\`\``
         : `드리프트 검사 실패:\n\`\`\`\n${(drift.error || '').substring(0, 800)}\n\`\`\``;
+      const why = unsafeSql.length > 0
+        ? `\n\n자동 생성은 **가산적 변경(컬럼·테이블·인덱스 추가)** 에만 적용됩니다. 아래 구문은 기존 데이터에 영향을 줄 수 있어 사람이 판단해야 합니다.\n\`\`\`sql\n${unsafeSql.join(';\n').substring(0, 500)}\n\`\`\``
+        : (autoMigration ? `\n\n마이그레이션 \`${autoMigration.name}\` 을 자동 생성했으나 재검사에서 차이가 남아 중단했습니다.` : '');
       logger.error(`Backend: migration drift detected for PR #${pr.number}, deploy blocked`, { sql: drift.sql, error: drift.error });
       await restoreMain();
       await githubApi.commentOnIssue(owner, config.repo, number,
-        `⚠️ 백엔드 PR ${owner}/${repo}#${pr.number} 은 빌드에 성공했으나 **\`prisma/migrations\` 에 누락된 스키마 변경**이 있어 머지·배포를 중단했습니다. 이대로 배포하면 해당 모델의 모든 요청이 Prisma P2022 → 500 이 됩니다.\n\n${detail}\n\n마이그레이션을 생성(\`prisma migrate dev\`)해 PR에 추가한 뒤 다시 진행해 주세요.`
+        `⚠️ 백엔드 PR ${owner}/${repo}#${pr.number} 은 빌드에 성공했으나 **\`prisma/migrations\` 에 누락된 스키마 변경**이 있어 머지·배포를 중단했습니다. 이대로 배포하면 해당 모델의 모든 요청이 Prisma P2022 → 500 이 됩니다.\n\n${detail}${why}\n\n마이그레이션을 생성(\`prisma migrate dev\`)해 PR에 추가한 뒤 다시 진행해 주세요.`
       ).catch(() => {});
       return { prNumber: pr.number, deployed: false, driftBlocked: true, files: commitFiles };
     }
-    logger.info(`Backend: migration drift check passed for PR #${pr.number}`);
+    if (autoMigration) {
+      logger.info(`Backend: migration drift resolved by auto-migration ${autoMigration.name} for PR #${pr.number}`);
+    } else {
+      logger.info(`Backend: migration drift check passed for PR #${pr.number}`);
+    }
 
     // 5. 머지 (squash) → 배포 (deployCommand, 미설정이면 배포 스킵)
     await githubApi.mergePullRequest(owner, repo, pr.number, { mergeMethod: 'squash' });
@@ -277,7 +378,10 @@ async function handleBackendChanges(issueData, preDirty = {}) {
     try { await githubApi.deleteBranch(owner, repo, branch); } catch (_) {}
 
     // 7. 프론트 이슈에 결과 보고 (config.repo = 프론트 레포. repo는 백엔드 레포이므로 사용 금지)
-    const filesList = `\n\n**변경 파일:**\n${commitFiles.map(f => '- ' + f).join('\n')}`;
+    const migNote = autoMigration
+      ? `\n\n🗄️ DB 스키마 변경이 있어 마이그레이션 \`${autoMigration.name}\` 을 자동 생성해 함께 배포했습니다.`
+      : '';
+    const filesList = `${migNote}\n\n**변경 파일:**\n${commitFiles.map(f => '- ' + f).join('\n')}`;
     if (!deployCmd) {
       await githubApi.commentOnIssue(owner, config.repo, number,
         `🛠️ 근본원인이 백엔드에 있어 백엔드까지 수정했습니다. PR ${owner}/${repo}#${pr.number} 머지 + 빌드 성공. (배포 커맨드 미설정 → 자동 배포는 스킵, 서비스 반영은 수동 필요)${filesList}`
@@ -319,4 +423,4 @@ async function restoreMain(branch = null) {
   }
 }
 
-module.exports = { handleBackendChanges, getBackendChangedFiles, getBackendDirtySnapshot, getBackendFileStatuses, isNewlyAddedMigration, checkMigrationDrift };
+module.exports = { handleBackendChanges, getBackendChangedFiles, getBackendDirtySnapshot, getBackendFileStatuses, isNewlyAddedMigration, checkMigrationDrift, classifyMigrationSql, writeAutoMigration };

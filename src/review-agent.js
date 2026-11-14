@@ -73,7 +73,7 @@ async function runReview(prNumber, diff, issueTitle, issueBody, fileList = '') {
 
   return new Promise((resolve, reject) => {
     const disallowed = config.claude.disallowedTools ? ` --disallowedTools "${config.claude.disallowedTools}"` : '';
-    const cmd = `cd "${config.workspaceDir}" && cat "${promptFile}" | claude -p --allowedTools "${config.claude.reviewTools}"${disallowed} > "${outputFile}" 2>&1`;
+    const cmd = `cd "${config.workspaceDir}" && cat "${promptFile}" | claude -p --model "${config.claude.model}" --allowedTools "${config.claude.reviewTools}"${disallowed} > "${outputFile}" 2>&1`;
 
     exec(cmd, {
       maxBuffer: 10 * 1024 * 1024,
@@ -247,6 +247,14 @@ async function reviewPR(prNumber, retryCount = 0) {
           // main으로 복귀
           try { await gitOps.checkout(config.baseBranch); } catch (_) {}
           if (stashed) { try { await gitOps.stashDrop(); } catch (_) {} }
+
+          // 타임아웃은 코드 문제가 아님 — 수정 에이전트를 돌리면 멀쩡한 코드를 건드리며 재시도만 소진한다
+          if (buildErr.timedOut) {
+            await githubApi.commentOnIssue(owner, repo, prNumber,
+              '⏱️ 빌드가 시간 초과로 중단되었습니다 (서버 부하). 코드 수정 없이 재리뷰/재빌드가 필요합니다.'
+            );
+            return { verdict: 'BUILD_FAILED', timedOut: true, retryCount };
+          }
 
           // 빌드 실패를 REQUEST_CHANGES로 처리하여 refix 루프 진입
           if (retryCount < config.claude.maxRetries) {

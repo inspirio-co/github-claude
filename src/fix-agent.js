@@ -187,7 +187,7 @@ async function _execClaude(prompt, tools, label, sessionId) {
     // (cwd는 프론트로 유지 → 프론트 변경 감지/커밋 흐름은 그대로)
     const addDir = (config.backend.enabled && config.backend.workspaceDir)
       ? ` --add-dir "${config.backend.workspaceDir}"` : '';
-    const cmd = `cd "${config.workspaceDir}" && cat "${promptFile}" | claude -p --output-format json --allowedTools "${tools}"${disallowed}${addDir}${resumeFlag} > "${outputFile}" 2>&1`;
+    const cmd = `cd "${config.workspaceDir}" && cat "${promptFile}" | claude -p --model "${config.claude.model}" --output-format json --allowedTools "${tools}"${disallowed}${addDir}${resumeFlag} > "${outputFile}" 2>&1`;
 
     exec(cmd, {
       maxBuffer: 10 * 1024 * 1024,

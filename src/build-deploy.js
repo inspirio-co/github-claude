@@ -15,11 +15,17 @@ function runCommand(cmd, label) {
     exec(cmd, {
       cwd: config.workspaceDir,
       maxBuffer: 10 * 1024 * 1024,
-      timeout: 300000, // 5분
+      // 서버 부하가 높을 땐 vite build 단독으로도 5분을 넘긴다 (2026-09-30 #1416~#1422 전부 5분 00초 컷)
+      timeout: config.buildTimeout,
     }, (error, stdout, stderr) => {
       if (error) {
-        logger.error(`${label} failed`, { error: error.message, stderr: stderr?.substring(0, 500) });
-        reject(new Error(`${label} failed: ${stderr || error.message}`));
+        const timedOut = error.killed || error.signal === 'SIGTERM';
+        logger.error(`${label} failed`, { error: error.message, timedOut, stderr: stderr?.substring(0, 500) });
+        const err = timedOut
+          ? new Error(`${label} failed: 타임아웃 (${Math.round(config.buildTimeout / 60000)}분 초과로 강제 종료됨 — 코드 오류 아님, 서버 부하 확인)`)
+          : new Error(`${label} failed: ${stderr || error.message}`);
+        err.timedOut = timedOut;
+        reject(err);
       } else {
         logger.info(`${label} completed successfully`, { outputLength: (stdout || '').length });
         resolve(stdout || '');

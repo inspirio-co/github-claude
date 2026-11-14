@@ -77,7 +77,7 @@ ${clip(diff, 30000) || '(diff 없음)'}
   await fs.writeFile(promptFile, prompt);
 
   const raw = await new Promise((resolve, reject) => {
-    const cmd = `cd "${config.workspaceDir}" && cat "${promptFile}" | claude -p --output-format json `
+    const cmd = `cd "${config.workspaceDir}" && cat "${promptFile}" | claude -p --output-format json --model "${config.claude.model}" `
       + `--disallowedTools "Bash,Task,Agent,Edit,Write" > "${outputFile}" 2>&1`;
     exec(cmd, { maxBuffer: 10 * 1024 * 1024, timeout: config.changelog.timeout }, async (error) => {
       let out = '';

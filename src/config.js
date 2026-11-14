@@ -49,6 +49,9 @@ const config = {
 
   // Claude Code
   claude: {
+    // 모델을 명시하지 않으면 전역 ~/.claude/settings.json 의 기본 모델을 따라간다.
+    // GLM 세션에서 /model 로 glm-5.3 이 저장되자 파이프라인 전체가 unrecognized_model 로 멈췄다(#1979).
+    model: process.env.CLAUDE_MODEL || 'opus',
     allowedTools: process.env.CLAUDE_ALLOWED_TOOLS || 'Edit,Write,Glob,Grep,Read',
     reviewTools: process.env.CLAUDE_REVIEW_TOOLS || 'Glob,Grep,Read',
     // Monitor/TaskOutput/ToolSearch는 셸 실행 우회 경로 → Bash,Task와 함께 차단 (#685)
@@ -71,6 +74,7 @@ const config = {
 
   // Build & Deploy
   buildCommand: process.env.BUILD_COMMAND || '',
+  buildTimeout: parseInt(process.env.BUILD_TIMEOUT || '1200000', 10),
   deployCommand: process.env.DEPLOY_COMMAND || '',
 
   // 수정내역 자동기록 (루터 DATABASE — QA가 읽는 자연어 표)
